@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="/static/images/logo.png" type="image/png">
+<title>LOK 超级工作台</title>
+<style>
+  @import url('/static/vendor/css/fonts.css?v=2026.06.10.1.1781140972');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+    background: #0a0e14;
+    color: #e5e9f0;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+  }
+
+  .particles {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .particle {
+    position: absolute;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.03);
+    animation: floatUp linear infinite;
+  }
+
+  @keyframes floatUp {
+    0% { transform: translateY(100vh) scale(0); opacity: 0; }
+    10% { opacity: 0.6; }
+    90% { opacity: 0.3; }
+    100% { transform: translateY(-10vh) scale(1.2); opacity: 0; }
+  }
+
+  .container {
+    position: relative;
+    z-index: 1;
+    text-align: center;
+    max-width: 600px;
+    padding: 40px;
+  }
+
+  .logo-mark {
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 32px;
+    border: 2px solid rgba(255,255,255,0.12);
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    animation: logoPulse 2s ease-in-out infinite;
+  }
+
+  .logo-mark::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 20px;
+    border: 1px solid rgba(255,255,255,0.05);
+    animation: logoRing 3s ease-in-out infinite;
+  }
+
+  .logo-text {
+    font-size: 28px;
+    font-weight: 500;
+    letter-spacing: 2px;
+    color: #fff;
+  }
+
+  @keyframes logoPulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.03); }
+  }
+
+  @keyframes logoRing {
+    0%, 100% { opacity: 0.3; transform: scale(1); }
+    50% { opacity: 0.8; transform: scale(1.08); }
+  }
+
+  h1 {
+    font-size: 36px;
+    font-weight: 500;
+    letter-spacing: 4px;
+    margin-bottom: 12px;
+    color: #fff;
+    animation: fadeSlideUp 0.8s ease-out 0.2s both;
+  }
+
+  .subtitle {
+    font-size: 15px;
+    color: rgba(255,255,255,0.4);
+    letter-spacing: 6px;
+    margin-bottom: 48px;
+    animation: fadeSlideUp 0.8s ease-out 0.4s both;
+  }
+
+  .progress-wrap {
+    width: 200px;
+    height: 2px;
+    margin: 0 auto 32px;
+    background: rgba(255,255,255,0.08);
+    border-radius: 1px;
+    overflow: hidden;
+    animation: fadeSlideUp 0.8s ease-out 0.6s both;
+  }
+
+  .progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, rgba(255,255,255,0.15), rgba(255,255,255,0.6), rgba(255,255,255,0.15));
+    border-radius: 1px;
+    width: 0%;
+    animation: progressGrow 2.5s ease-out 0.8s forwards;
+  }
+
+  @keyframes progressGrow {
+    0% { width: 0%; }
+    50% { width: 70%; }
+    80% { width: 88%; }
+    100% { width: 100%; }
+  }
+
+  @keyframes fadeSlideUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .features {
+    display: flex;
+    gap: 32px;
+    justify-content: center;
+    animation: fadeSlideUp 0.8s ease-out 1s both;
+  }
+
+  .feature-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .feature-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.06);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .feature-icon svg {
+    width: 18px;
+    height: 18px;
+    stroke: rgba(255,255,255,0.5);
+    stroke-width: 1.5;
+  }
+
+  .feature-label {
+    font-size: 12px;
+    color: rgba(255,255,255,0.3);
+    letter-spacing: 1px;
+  }
+
+  .skip-btn {
+    position: fixed;
+    bottom: 40px;
+    right: 40px;
+    z-index: 2;
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.1);
+    color: rgba(255,255,255,0.4);
+    padding: 8px 20px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: all 0.3s;
+  }
+
+  .skip-btn:hover {
+    border-color: rgba(255,255,255,0.3);
+    color: rgba(255,255,255,0.8);
+    background: rgba(255,255,255,0.05);
+  }
+
+  .loading-hint {
+    font-size: 12px;
+    color: rgba(255,255,255,0.2);
+    letter-spacing: 2px;
+    margin-top: 40px;
+    animation: fadeSlideUp 0.8s ease-out 1.2s both;
+  }
+
+  /* ===== Splash Page ===== */
+  .splash-page {
+    display: block;
+    position: relative;
+    z-index: 1;
+    text-align: center;
+    max-width: 600px;
+    padding: 40px;
+  }
+
+  .splash-page.hidden {
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="particles" id="particles"></div>
+
+<!-- Splash Page -->
+<div class="splash-page" id="splashPage">
+  <div class="container">
+    <div class="logo-mark">
+      <span class="logo-text">L</span>
+    </div>
+
+    <h1>LOK 超级工作台</h1>
+    <p class="subtitle">AI · 创作 · 无限</p>
+
+    <div class="progress-wrap">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+
+    <div class="features">
+      <div class="feature-item">
+        <div class="feature-icon">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.587-1.587a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+          </svg>
+        </div>
+        <span class="feature-label">AI 生图</span>
+      </div>
+      <div class="feature-item">
+        <div class="feature-icon">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <polygon points="23 7 16 12 23 17 23 7"/>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+          </svg>
+        </div>
+        <span class="feature-label">视频创作</span>
+      </div>
+      <div class="feature-item">
+        <div class="feature-icon">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <rect x="3" y="3" width="7" height="7"/>
+            <rect x="14" y="3" width="7" height="7"/>
+            <rect x="14" y="14" width="7" height="7"/>
+            <rect x="3" y="14" width="7" height="7"/>
+          </svg>
+        </div>
+        <span class="feature-label">无限画布</span>
+      </div>
+      <div class="feature-item">
+        <div class="feature-icon">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+        </div>
+        <span class="feature-label">智能体</span>
+      </div>
+    </div>
+
+    <p class="loading-hint">正在启动引擎</p>
+  </div>
+
+  <button class="skip-btn" onclick="enterApp()">跳过 &rsaquo;</button>
+</div>
+
+<script>
+  (function() {
+    var count = 50;
+    var container = document.getElementById('particles');
+    for (var i = 0; i < count; i++) {
+      var p = document.createElement('div');
+      p.className = 'particle';
+      var size = Math.random() * 3 + 1;
+      p.style.width = size + 'px';
+      p.style.height = size + 'px';
+      p.style.left = Math.random() * 100 + '%';
+      p.style.animationDuration = (Math.random() * 10 + 8) + 's';
+      p.style.animationDelay = (Math.random() * 10) + 's';
+      container.appendChild(p);
+    }
+  })();
+
+  function startSplashTimer() {
+    var bar = document.getElementById('progressBar');
+    if (!bar) return;
+    bar.style.animation = 'none';
+    bar.offsetHeight;
+    bar.style.animation = 'progressGrow 2.5s ease-out 0.8s forwards';
+    bar.addEventListener('animationend', function handler() {
+      bar.removeEventListener('animationend', handler);
+      setTimeout(enterApp, 300);
+    });
+  }
+
+  function enterApp() {
+    sessionStorage.setItem('lok_splash_done', '1');
+    window.location.href = '/app';
+  }
+
+  // 初始化
+  document.addEventListener('DOMContentLoaded', function() {
+    startSplashTimer();
+  });
+</script>
+</body>
+</html>

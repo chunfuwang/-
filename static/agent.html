@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智能体 - LOK 超级工作台</title>
+<style>
+  @import url('/static/vendor/css/fonts.css?v=2026.06.10.1.1781140972');
+
+  :root {
+    --bg: #fcfcfc; --card-bg: #fff; --text: #121212; --text-secondary: #666;
+    --text-muted: #999; --border: #f0f0f0; --accent: #000; --input-bg: #f8f8f8;
+    --tag-bg: #f5f5f5; --tag-text: #555; --danger: #e24b4a; --success: #1d9e75;
+    --user-bubble: #eef2f6; --ai-bubble: #fff;
+  }
+  html.theme-dark, body.theme-dark {
+    --bg: #111722; --card-bg: #171d29; --text: #e5e9f0; --text-secondary: #8f9aab;
+    --text-muted: #5a6474; --border: #242d3b; --accent: #fff; --input-bg: #1a2130;
+    --tag-bg: #1e2840; --tag-text: #8f9aab;
+    --user-bubble: #1e2840; --ai-bubble: #171d29;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.6; height: 100vh; overflow: hidden;
+  }
+
+  .app-layout { display: flex; height: 100vh; }
+
+  /* 左侧列表 */
+  .agent-list {
+    width: 280px; border-right: 1px solid var(--border); background: var(--card-bg);
+    display: flex; flex-direction: column; flex-shrink: 0;
+  }
+  .list-header {
+    padding: 18px 18px 12px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .list-header h2 { font-size: 15px; font-weight: 600; letter-spacing: 0.5px; }
+  .add-btn {
+    width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--input-bg); cursor: pointer; display: flex; align-items: center;
+    justify-content: center; color: var(--text-secondary); transition: all 0.2s;
+  }
+  .add-btn:hover { border-color: var(--text-muted); color: var(--text); }
+  .list-scroll { flex: 1; overflow-y: auto; padding: 6px; }
+
+  .agent-item {
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px;
+    cursor: pointer; transition: all 0.15s; border: 1px solid transparent; margin-bottom: 2px;
+  }
+  .agent-item:hover { background: var(--input-bg); }
+  .agent-item.active { background: var(--input-bg); border-color: var(--border); }
+  .agent-avatar {
+    width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; font-weight: 600; color: #fff; overflow: hidden;
+  }
+  .agent-avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .agent-info { min-width: 0; flex: 1; }
+  .agent-info-name { font-size: 13px; font-weight: 500; line-height: 1.2; }
+  .agent-info-model { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  .agent-actions { display: flex; gap: 2px; opacity: 0; transition: opacity 0.15s; }
+  .agent-item:hover .agent-actions { opacity: 1; }
+  .agent-action-btn {
+    width: 26px; height: 26px; border-radius: 6px; border: none; background: transparent;
+    cursor: pointer; color: var(--text-muted); display: flex; align-items: center;
+    justify-content: center; transition: all 0.15s;
+  }
+  .agent-action-btn:hover { background: var(--tag-bg); color: var(--text); }
+  .agent-action-btn.danger:hover { background: rgba(226,75,74,0.1); color: var(--danger); }
+
+  /* 右侧主区 */
+  .chat-panel {
+    flex: 1; display: flex; flex-direction: column; min-width: 0;
+    background: var(--bg);
+  }
+
+  /* 顶部栏 */
+  .chat-topbar {
+    display: flex; align-items: center; gap: 10px; padding: 12px 20px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .chat-topbar .agent-avatar { width: 32px; height: 32px; font-size: 13px; }
+  .chat-topbar-name { font-size: 14px; font-weight: 500; }
+  .chat-topbar-model { font-size: 11px; color: var(--text-muted); margin-left: 6px; }
+  .chat-topbar-actions { margin-left: auto; display: flex; gap: 6px; }
+  .topbar-btn {
+    padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--input-bg); color: var(--text-secondary); font-size: 12px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .topbar-btn:hover { border-color: var(--text-muted); color: var(--text); }
+  .topbar-btn.settings-btn { display: flex; align-items: center; gap: 4px; }
+
+  /* 消息区 */
+  .messages {
+    flex: 1; overflow-y: auto; padding: 20px 24px; display: flex;
+    flex-direction: column; gap: 16px;
+  }
+  .msg-row { display: flex; gap: 10px; max-width: 85%; }
+  .msg-row.user { align-self: flex-end; flex-direction: row-reverse; }
+  .msg-row.assistant { align-self: flex-start; }
+  .msg-avatar {
+    width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600; color: #fff; margin-top: 2px;
+  }
+  .msg-avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+  .msg-avatar.user-avatar { background: #5b7fff; }
+  .msg-bubble {
+    padding: 10px 14px; border-radius: 12px; font-size: 13px; line-height: 1.65;
+    word-break: break-word; white-space: pre-wrap;
+  }
+  .msg-row.user .msg-bubble { background: #5b7fff; color: #fff; border-bottom-right-radius: 4px; }
+  .msg-row.assistant .msg-bubble { background: var(--ai-bubble); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .msg-row.assistant .msg-bubble.streaming { border-style: dashed; }
+
+  /* 输入区 */
+  .chat-input-area {
+    padding: 12px 20px 16px; border-top: 1px solid var(--border); flex-shrink: 0;
+  }
+  .input-row { display: flex; gap: 8px; align-items: flex-end; }
+  .chat-textarea {
+    flex: 1; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--input-bg); color: var(--text); font-size: 13px; font-family: inherit;
+    line-height: 1.5; outline: none; resize: none; min-height: 40px; max-height: 120px;
+  }
+  .chat-textarea:focus { border-color: var(--text-muted); }
+  .send-btn {
+    width: 40px; height: 40px; border-radius: 10px; border: none; background: var(--accent);
+    color: var(--card-bg); cursor: pointer; display: flex; align-items: center;
+    justify-content: center; transition: all 0.15s; flex-shrink: 0;
+  }
+  .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .send-btn:hover:not(:disabled) { opacity: 0.85; }
+
+  /* 空状态 */
+  .empty-chat {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; color: var(--text-muted); gap: 8px;
+  }
+  .empty-chat .agent-avatar { width: 56px; height: 56px; font-size: 22px; margin-bottom: 4px; }
+  .empty-chat-name { font-size: 16px; font-weight: 500; color: var(--text); }
+  .empty-chat-desc { font-size: 13px; max-width: 320px; text-align: center; }
+
+  /* 设置弹窗 */
+  .settings-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 100;
+    display: none; align-items: center; justify-content: center;
+  }
+  .settings-overlay.open { display: flex; }
+  .settings-modal {
+    background: var(--card-bg); border-radius: 14px; border: 1px solid var(--border);
+    width: 520px; max-height: 80vh; overflow-y: auto; padding: 24px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+  }
+  .settings-modal h3 { font-size: 16px; font-weight: 600; margin-bottom: 18px; }
+  .form-group { margin-bottom: 16px; }
+  .form-label {
+    font-size: 12px; font-weight: 500; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; display: block;
+  }
+  .form-input, .form-select, .form-textarea {
+    width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--input-bg); color: var(--text); font-size: 13px; font-family: inherit;
+    outline: none; transition: border-color 0.15s;
+  }
+  .form-input:focus, .form-select:focus, .form-textarea:focus { border-color: var(--text-muted); }
+  .form-textarea { min-height: 80px; resize: vertical; line-height: 1.6; }
+  .form-row { display: flex; gap: 10px; }
+  .form-row .form-group { flex: 1; }
+  .avatar-picker { display: flex; gap: 8px; align-items: center; }
+  .avatar-preview {
+    width: 48px; height: 48px; border-radius: 50%; border: 2px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; font-weight: 600; color: #fff; overflow: hidden; flex-shrink: 0;
+  }
+  .avatar-preview img { width: 100%; height: 100%; object-fit: cover; }
+  .avatar-colors { display: flex; gap: 4px; flex-wrap: wrap; }
+  .avatar-color {
+    width: 22px; height: 22px; border-radius: 50%; cursor: pointer; border: 2px solid transparent;
+    transition: all 0.15s;
+  }
+  .avatar-color:hover { transform: scale(1.15); }
+  .avatar-color.selected { border-color: var(--text); }
+  .avatar-emoji-pick { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+  .avatar-emoji-btn {
+    width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--input-bg); cursor: pointer; font-size: 14px;
+    display: flex; align-items: center; justify-content: center; transition: all 0.15s;
+  }
+  .avatar-emoji-btn:hover { border-color: var(--text-muted); }
+  .avatar-emoji-btn.selected { border-color: var(--text); background: var(--tag-bg); }
+  .settings-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+  .btn {
+    padding: 8px 18px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--input-bg); color: var(--text-secondary); font-size: 13px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .btn:hover { border-color: var(--text-muted); color: var(--text); }
+  .btn-primary { background: var(--accent); color: var(--card-bg); border-color: var(--accent); font-weight: 500; }
+  .btn-primary:hover { opacity: 0.85; color: var(--card-bg); }
+  .btn-danger { border-color: rgba(226,75,74,0.3); color: var(--danger); }
+  .btn-danger:hover { background: rgba(226,75,74,0.08); }
+
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    padding: 10px 24px; border-radius: 8px; background: var(--card-bg);
+    border: 1px solid var(--border); color: var(--text); font-size: 13px;
+    opacity: 0; pointer-events: none; transition: opacity 0.3s; z-index: 200;
+  }
+  .toast.show { opacity: 1; }
+
+  .typing-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); animation: bounce 1.2s infinite; }
+  .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-4px); } }
+</style>
+</head>
+<body>
+
+<div class="app-layout">
+  <!-- 左侧智能体列表 -->
+  <aside class="agent-list">
+    <div class="list-header">
+      <h2>智能体</h2>
+      <button class="add-btn" onclick="createAgent()" title="新建智能体">
+        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2">
+          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+      </button>
+    </div>
+    <div class="list-scroll" id="agentList"></div>
+  </aside>
+
+  <!-- 右侧聊天面板 -->
+  <main class="chat-panel" id="chatPanel">
+    <!-- 空状态 -->
+    <div class="empty-chat" id="emptyChat">
+      <div class="agent-avatar" style="background:#5b7fff;">🤖</div>
+      <div class="empty-chat-name">选择一个智能体开始对话</div>
+      <div class="empty-chat-desc">在左侧列表选择或新建智能体，配置 API 和模型后即可聊天</div>
+    </div>
+
+    <!-- 聊天界面 -->
+    <div id="chatUI" style="display:none;flex-direction:column;flex:1;min-height:0;">
+      <div class="chat-topbar">
+        <div class="agent-avatar" id="chatAvatar" style="background:#5b7fff;">🤖</div>
+        <span class="chat-topbar-name" id="chatName">智能体</span>
+        <span class="chat-topbar-model" id="chatModel">未配置</span>
+        <div class="chat-topbar-actions">
+          <button class="topbar-btn" onclick="clearChat()">清空对话</button>
+          <button class="topbar-btn settings-btn" onclick="openSettings()">
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+            设置
+          </button>
+        </div>
+      </div>
+      <div class="messages" id="messages"></div>
+      <div class="chat-input-area">
+        <div class="input-row">
+          <textarea class="chat-textarea" id="chatInput" rows="1" placeholder="输入消息..." onkeydown="handleKey(event)"></textarea>
+          <button class="send-btn" id="sendBtn" onclick="sendMessage()" disabled>
+            <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- 设置弹窗 -->
+<div class="settings-overlay" id="settingsOverlay">
+  <div class="settings-modal">
+    <h3>智能体设置</h3>
+    <div class="form-group">
+      <label class="form-label">名称</label>
+      <input class="form-input" id="setName" placeholder="智能体名称" maxlength="30">
+    </div>
+    <div class="form-group">
+      <label class="form-label">描述</label>
+      <input class="form-input" id="setDesc" placeholder="简短描述用途...">
+    </div>
+    <div class="form-group">
+      <label class="form-label">头像</label>
+      <div class="avatar-picker">
+        <div class="avatar-preview" id="avatarPreview" style="background:#5b7fff;">🤖</div>
+        <div style="flex:1;min-width:0;">
+          <div class="avatar-colors">
+            <div class="avatar-color" style="background:#5b7fff" onclick="pickColor('#5b7fff')" data-color="#5b7fff"></div>
+            <div class="avatar-color" style="background:#e24b4a" onclick="pickColor('#e24b4a')" data-color="#e24b4a"></div>
+            <div class="avatar-color" style="background:#1d9e75" onclick="pickColor('#1d9e75')" data-color="#1d9e75"></div>
+            <div class="avatar-color" style="background:#f59e0b" onclick="pickColor('#f59e0b')" data-color="#f59e0b"></div>
+            <div class="avatar-color" style="background:#8b5cf6" onclick="pickColor('#8b5cf6')" data-color="#8b5cf6"></div>
+            <div class="avatar-color" style="background:#ec4899" onclick="pickColor('#ec4899')" data-color="#ec4899"></div>
+            <div class="avatar-color" style="background:#06b6d4" onclick="pickColor('#06b6d4')" data-color="#06b6d4"></div>
+            <div class="avatar-color" style="background:#84cc16" onclick="pickColor('#84cc16')" data-color="#84cc16"></div>
+          </div>
+          <div class="avatar-emoji-pick" id="emojiPick"></div>
+        </div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">API 平台</label>
+        <select class="form-select" id="setProvider" onchange="onSetProviderChange()">
+          <option value="">-- 选择 --</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">模型</label>
+        <select class="form-select" id="setModel">
+          <option value="">-- 先选平台 --</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">温度</label>
+        <input class="form-input" id="setTemp" type="number" min="0" max="2" step="0.1" value="0.7">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">系统提示词</label>
+      <textarea class="form-textarea" id="setPrompt" placeholder="定义角色、行为和输出格式..."></textarea>
+    </div>
+    <div class="form-group">
+      <label class="form-label">用户规则</label>
+      <textarea class="form-textarea" id="setRules" placeholder="自定义规则，如格式要求、禁止内容..."></textarea>
+    </div>
+    <div class="settings-actions">
+      <button class="btn btn-danger" onclick="deleteCurrentAgent()">删除</button>
+      <button class="btn" onclick="closeSettings()">取消</button>
+      <button class="btn btn-primary" onclick="saveSettings()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const AGENTS_KEY = 'lok_agents';
+const CHATS_KEY_PREFIX = 'lok_agent_chats_';
+
+let agents = [];
+let apiProviders = [];
+let currentId = null;
+let currentChat = [];  // [{role, content}]
+let isStreaming = false;
+let editColors = ['#5b7fff','#e24b4a','#1d9e75','#f59e0b','#8b5cf6','#ec4899','#06b6d4','#84cc16'];
+let editEmojis = ['🤖','🧠','💡','🔮','🎯','⚡','🌟','💎','🔥','🎨','📚','🛡️','🧪','🗺️','🎭','💬'];
+
+// ---- API Providers ----
+async function loadApiProviders() {
+  try {
+    const data = await fetch('/api/providers').then(r => r.json());
+    apiProviders = (data.providers || []).filter(p => p.enabled !== false);
+  } catch(e) { apiProviders = []; }
+}
+
+function getProviderChatModels(pid) {
+  const p = apiProviders.find(x => x.id === pid);
+  return (p && p.chat_models) ? p.chat_models : [];
+}
+
+// ---- Agents CRUD ----
+function loadAgents() {
+  try { agents = JSON.parse(localStorage.getItem(AGENTS_KEY) || '[]'); } catch(e) { agents = []; }
+  if (!agents.length) {
+    agents.push({
+      id: 'default', name: '默认助手', desc: '通用AI助手',
+      avatar_color: '#5b7fff', avatar_emoji: '🤖',
+      provider_id: '', model: '', temperature: 0.7,
+      prompt: '你是一个专业、友好的AI助手。用简洁清晰的方式回答问题。', rules: ''
+    });
+    saveAgents();
+  }
+  // migrate old agents without avatar
+  agents.forEach(a => {
+    if (!a.avatar_color) a.avatar_color = '#5b7fff';
+    if (!a.avatar_emoji) a.avatar_emoji = '🤖';
+  });
+}
+
+function saveAgents() { localStorage.setItem(AGENTS_KEY, JSON.stringify(agents)); }
+
+function loadChat(id) {
+  try { currentChat = JSON.parse(localStorage.getItem(CHATS_KEY_PREFIX + id) || '[]'); }
+  catch(e) { currentChat = []; }
+}
+function saveChat(id) {
+  if (!id) return;
+  localStorage.setItem(CHATS_KEY_PREFIX + id, JSON.stringify(currentChat));
+}
+
+function renderList() {
+  const container = document.getElementById('agentList');
+  container.innerHTML = agents.map(a => {
+    const pname = getProviderName(a.provider_id);
+    const meta = pname ? (a.model ? pname + ' · ' + a.model : pname) : '未配置';
+    return `
+    <div class="agent-item ${a.id === currentId ? 'active' : ''}" onclick="switchAgent('${a.id}')">
+      <div class="agent-avatar" style="background:${a.avatar_color||'#5b7fff'}">${a.avatar_emoji||'🤖'}</div>
+      <div class="agent-info">
+        <div class="agent-info-name">${esc(a.name)}</div>
+        <div class="agent-info-model">${esc(meta)}</div>
+      </div>
+      <div class="agent-actions">
+        <button class="agent-action-btn" onclick="event.stopPropagation();openSettingsFor('${a.id}')" title="设置">
+          <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        </button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function getProviderName(pid) {
+  if (!pid) return '';
+  const p = apiProviders.find(x => x.id === pid);
+  return p ? (p.name || p.id) : pid;
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ---- Agent switching ----
+function switchAgent(id) {
+  if (isStreaming) return;
+  saveChat(currentId);
+  currentId = id;
+  const agent = agents.find(a => a.id === id);
+  if (!agent) return;
+
+  loadChat(id);
+  renderList();
+  showChatUI(agent);
+  renderMessages();
+}
+
+function showChatUI(agent) {
+  document.getElementById('emptyChat').style.display = 'none';
+  const ui = document.getElementById('chatUI');
+  ui.style.display = 'flex';
+
+  document.getElementById('chatAvatar').style.background = agent.avatar_color || '#5b7fff';
+  document.getElementById('chatAvatar').textContent = agent.avatar_emoji || '🤖';
+  document.getElementById('chatName').textContent = agent.name;
+  const pname = getProviderName(agent.provider_id);
+  document.getElementById('chatModel').textContent = agent.model ? (pname ? pname + ' · ' : '') + agent.model : '未配置模型';
+
+  updateSendButton();
+}
+
+function updateSendButton() {
+  const agent = agents.find(a => a.id === currentId);
+  const hasConfig = agent && agent.provider_id && agent.model;
+  document.getElementById('sendBtn').disabled = isStreaming || !hasConfig;
+}
+
+function renderMessages() {
+  const container = document.getElementById('messages');
+  const agent = agents.find(a => a.id === currentId);
+  if (!agent) return;
+
+  const color = agent.avatar_color || '#5b7fff';
+  const emoji = agent.avatar_emoji || '🤖';
+
+  if (currentChat.length === 0) {
+    container.innerHTML = `
+      <div class="empty-chat" style="padding:40px 0;">
+        <div class="agent-avatar" style="background:${color}">${emoji}</div>
+        <div class="empty-chat-name">${esc(agent.name)}</div>
+        <div class="empty-chat-desc">${esc(agent.desc || '开始对话吧')}</div>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = currentChat.map(m => `
+    <div class="msg-row ${m.role}">
+      <div class="msg-avatar ${m.role === 'user' ? 'user-avatar' : ''}" style="background:${m.role === 'user' ? '#5b7fff' : color}">
+        ${m.role === 'user' ? '👤' : emoji}
+      </div>
+      <div class="msg-bubble">${esc(m.content)}</div>
+    </div>
+  `).join('');
+  container.scrollTop = container.scrollHeight;
+}
+
+// ---- Chat ----
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
+
+async function sendMessage() {
+  if (isStreaming) return;
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if (!text) return;
+
+  const agent = agents.find(a => a.id === currentId);
+  if (!agent || !agent.provider_id || !agent.model) {
+    showToast('请先在设置中配置 API 平台和模型');
+    return;
+  }
+
+  input.value = '';
+  autoGrow(input);
+  isStreaming = true;
+  updateSendButton();
+
+  // add user message
+  currentChat.push({ role: 'user', content: text });
+  renderMessages();
+
+  // add placeholder assistant message
+  currentChat.push({ role: 'assistant', content: '' });
+  renderMessages();
+  const lastBubble = document.querySelector('.msg-row.assistant:last-child .msg-bubble');
+  if (lastBubble) lastBubble.classList.add('streaming');
+
+  try {
+    const res = await fetch('/api/agent/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: currentChat.filter(m => m.role !== 'assistant' || m.content),
+        provider_id: agent.provider_id,
+        model: agent.model,
+        temperature: agent.temperature,
+        system_prompt: agent.prompt,
+        rules: agent.rules
+      })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || '请求失败');
+    }
+    const data = await res.json();
+    currentChat[currentChat.length - 1].content = data.reply || '(空回复)';
+  } catch(e) {
+    currentChat[currentChat.length - 1].content = '错误: ' + e.message;
+  }
+
+  if (lastBubble) lastBubble.classList.remove('streaming');
+  renderMessages();
+  saveChat(currentId);
+  isStreaming = false;
+  updateSendButton();
+}
+
+function clearChat() {
+  if (!confirm('确定清空当前对话？')) return;
+  currentChat = [];
+  saveChat(currentId);
+  renderMessages();
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+// ---- Settings Modal ----
+function createAgent() {
+  const id = 'agent_' + Date.now();
+  agents.push({
+    id, name: '新智能体', desc: '', avatar_color: '#5b7fff', avatar_emoji: '🤖',
+    provider_id: '', model: '', temperature: 0.7, prompt: '', rules: ''
+  });
+  saveAgents();
+  switchAgent(id);
+  renderList();
+  openSettings();
+  showToast('智能体已创建');
+}
+
+function openSettingsFor(id) {
+  if (currentId !== id) switchAgent(id);
+  openSettings();
+}
+
+function openSettings() {
+  const agent = agents.find(a => a.id === currentId);
+  if (!agent) return;
+
+  document.getElementById('setName').value = agent.name || '';
+  document.getElementById('setDesc').value = agent.desc || '';
+  document.getElementById('setTemp').value = agent.temperature ?? 0.7;
+  document.getElementById('setPrompt').value = agent.prompt || '';
+  document.getElementById('setRules').value = agent.rules || '';
+
+  // avatar
+  editColors.forEach(c => {
+    const el = document.querySelector(`.avatar-color[data-color="${c}"]`);
+    if (el) el.classList.toggle('selected', c === (agent.avatar_color || '#5b7fff'));
+  });
+  document.getElementById('avatarPreview').style.background = agent.avatar_color || '#5b7fff';
+  document.getElementById('avatarPreview').textContent = agent.avatar_emoji || '🤖';
+
+  // emoji picker
+  const ep = document.getElementById('emojiPick');
+  ep.innerHTML = editEmojis.map(e =>
+    `<button class="avatar-emoji-btn ${e === (agent.avatar_emoji||'🤖') ? 'selected' : ''}" onclick="pickEmoji('${e}')">${e}</button>`
+  ).join('');
+
+  // providers
+  renderSetProviders(agent.provider_id);
+  // model
+  onSetProviderChange(agent.model);
+
+  document.getElementById('settingsOverlay').classList.add('open');
+}
+
+function closeSettings() {
+  document.getElementById('settingsOverlay').classList.remove('open');
+}
+
+function renderSetProviders(selectedId) {
+  const sel = document.getElementById('setProvider');
+  sel.innerHTML = '<option value="">-- 选择 --</option>';
+  apiProviders.forEach(p => {
+    sel.innerHTML += `<option value="${esc(p.id)}" ${p.id === selectedId ? 'selected' : ''}>${esc(p.name||p.id)} (${(p.chat_models||[]).length})</option>`;
+  });
+}
+
+function onSetProviderChange(preselectedModel) {
+  const pid = document.getElementById('setProvider').value;
+  const modelSel = document.getElementById('setModel');
+  const models = getProviderChatModels(pid);
+  if (!pid || models.length === 0) {
+    modelSel.innerHTML = '<option value="">-- 先选平台 --</option>';
+    modelSel.disabled = true;
+  } else {
+    modelSel.innerHTML = models.map(m =>
+      `<option value="${esc(m)}" ${m === preselectedModel ? 'selected' : ''}>${esc(m)}</option>`
+    ).join('');
+    modelSel.disabled = false;
+  }
+}
+
+function pickColor(color) {
+  document.querySelectorAll('.avatar-color').forEach(el => el.classList.remove('selected'));
+  document.querySelector(`.avatar-color[data-color="${color}"]`)?.classList.add('selected');
+  document.getElementById('avatarPreview').style.background = color;
+}
+
+function pickEmoji(emoji) {
+  document.querySelectorAll('.avatar-emoji-btn').forEach(el => el.classList.remove('selected'));
+  event.target.classList.add('selected');
+  document.getElementById('avatarPreview').textContent = emoji;
+}
+
+function saveSettings() {
+  const agent = agents.find(a => a.id === currentId);
+  if (!agent) return;
+
+  agent.name = document.getElementById('setName').value.trim() || '未命名';
+  agent.desc = document.getElementById('setDesc').value.trim();
+  agent.provider_id = document.getElementById('setProvider').value;
+  agent.model = document.getElementById('setModel').value;
+  agent.temperature = parseFloat(document.getElementById('setTemp').value) || 0.7;
+  agent.prompt = document.getElementById('setPrompt').value;
+  agent.rules = document.getElementById('setRules').value;
+  agent.avatar_color = document.getElementById('avatarPreview').style.background;
+  agent.avatar_emoji = document.getElementById('avatarPreview').textContent;
+
+  saveAgents();
+  renderList();
+  showChatUI(agent);
+  closeSettings();
+  showToast('已保存');
+}
+
+function deleteCurrentAgent() {
+  if (!currentId) return;
+  if (!confirm('确定要删除「' + (agents.find(a=>a.id===currentId)?.name||'') + '」吗？')) return;
+  agents = agents.filter(a => a.id !== currentId);
+  localStorage.removeItem(CHATS_KEY_PREFIX + currentId);
+  saveAgents();
+  currentId = agents.length > 0 ? agents[0].id : null;
+  currentChat = [];
+  renderList();
+  if (currentId) {
+    switchAgent(currentId);
+  } else {
+    document.getElementById('chatUI').style.display = 'none';
+    document.getElementById('emptyChat').style.display = 'flex';
+  }
+  closeSettings();
+}
+
+// ---- Toast ----
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2000);
+}
+
+// ---- Theme ----
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.type === 'studio-theme') {
+    document.body.classList.toggle('theme-dark', e.data.theme === 'dark');
+  }
+});
+
+document.getElementById('chatInput').addEventListener('input', function() { autoGrow(this); });
+document.getElementById('settingsOverlay').addEventListener('click', function(e) {
+  if (e.target === this) closeSettings();
+});
+
+(async function() {
+  await loadApiProviders();
+  loadAgents();
+  renderList();
+  if (agents.length > 0) {
+    switchAgent(agents[0].id);
+  }
+  try {
+    const theme = localStorage.getItem('studio_theme') || localStorage.getItem('canvas_theme') || 'light';
+    if (theme === 'dark') document.body.classList.add('theme-dark');
+  } catch(e) {}
+})();
+</script>
+</body>
+</html>

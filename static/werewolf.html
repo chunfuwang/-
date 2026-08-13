@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>狼人杀 - LOK</title>
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.06.10.1.1781140972"></script>
+    <script src="/static/js/theme.js?v=2026.06.10.1.1781140970"></script>
+    <script src="/static/js/i18n.js?v=2026.06.10.1.1781142618"></script>
+    <link rel="stylesheet" href="/static/css/werewolf.css?v=2026.06.10.1.1781155770">
+</head>
+<body class="werewolf-body">
+
+    <!-- ========== 顶部状态栏 ========== -->
+    <div class="ww-topbar">
+        <div class="ww-topbar-left">
+            <span class="ww-logo-icon">🐺</span>
+            <span class="ww-logo-text">LOK 狼人杀</span>
+        </div>
+        <div class="ww-topbar-center" id="gamePhaseBadge">
+            <span class="ww-phase-badge setup">游戏设置</span>
+        </div>
+        <div class="ww-topbar-right">
+            <span class="ww-topbar-hint" id="topbarHint">你扮演：主持人（上帝）</span>
+        </div>
+    </div>
+
+    <div class="ww-main">
+
+        <!-- ========== 设置面板 ========== -->
+        <div id="setupPanel" class="ww-panel ww-setup-panel">
+            <div class="ww-panel-header">
+                <h2>游戏设置</h2>
+                <p>选择预设方案，配置各身份的 API 参数，开始狼人杀</p>
+            </div>
+
+            <!-- 预设方案 -->
+            <div class="ww-section">
+                <div class="ww-section-title">预设方案</div>
+                <div class="ww-preset-grid">
+                    <button class="ww-preset-card" data-preset="beginner" onclick="applyPreset('beginner')">
+                        <div class="ww-preset-name">新手局 (6人)</div>
+                        <div class="ww-preset-detail">2狼 · 1预言家 · 1女巫 · 2村民</div>
+                    </button>
+                    <button class="ww-preset-card" data-preset="standard" onclick="applyPreset('standard')">
+                        <div class="ww-preset-name">标准局 (9人)</div>
+                        <div class="ww-preset-detail">3狼 · 1预言家 · 1女巫 · 1猎人 · 3村民</div>
+                    </button>
+                    <button class="ww-preset-card" data-preset="advanced" onclick="applyPreset('advanced')">
+                        <div class="ww-preset-name">进阶局 (12人)</div>
+                        <div class="ww-preset-detail">4狼 · 1预言家 · 1女巫 · 1猎人 · 1守卫 · 4村民</div>
+                    </button>
+                </div>
+            </div>
+
+            <!-- API 配置 -->
+            <div class="ww-section">
+                <div class="ww-section-title">API 配置</div>
+                <p class="ww-section-desc">每个身份可独立选择全局 API 平台和模型。不启用则使用本地随机决策。</p>
+                <div id="apiConfigArea"></div>
+            </div>
+
+            <!-- 自动模式 -->
+            <div class="ww-section" style="margin-bottom: 16px;">
+                <div class="ww-section-title">游戏模式</div>
+                <div class="ww-auto-mode-row">
+                    <div class="ww-auto-mode-info">
+                        <span class="ww-auto-mode-label">🤖 自动模式</span>
+                        <span class="ww-auto-mode-desc">AI 自动推进全部流程，无需手动操作。关闭后需手动点击按钮推进。</span>
+                    </div>
+                    <label class="ww-toggle">
+                        <input type="checkbox" id="autoModeToggle" onchange="toggleAutoMode(this.checked)">
+                        <span class="ww-toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- 开始按钮 -->
+            <div class="ww-start-section">
+                <button class="ww-btn-primary ww-btn-lg" onclick="startGame()" id="btnStartGame">
+                    开始游戏
+                </button>
+                <div id="startGameError" class="ww-error" style="display:none"></div>
+            </div>
+        </div>
+
+        <!-- ========== 游戏面板 ========== -->
+        <div id="gamePanel" class="ww-game-panel" style="display:none">
+
+            <!-- 游戏子顶栏 -->
+            <div class="ww-game-topbar">
+                <div class="ww-game-topbar-left" id="gameTopbarDay">第 1 天</div>
+                <div class="ww-game-topbar-center" id="gameTopbarPhase">🌙 黑夜</div>
+                <div class="ww-game-topbar-right" id="gameTopbarRoles">3狼 1预 1女 3民</div>
+            </div>
+
+            <!-- 主游戏区 -->
+            <div class="ww-game-main">
+
+                <!-- 圆桌区域 -->
+                <div class="ww-round-table-wrap">
+                    <div class="ww-round-table" id="roundTable">
+                        <!-- 圆桌中心：阶段信息 + 操作按钮 -->
+                        <div class="ww-table-center" id="tableCenter">
+                            <div class="ww-table-phase-icon" id="phaseIcon">🌙</div>
+                            <div class="ww-table-phase-title" id="phaseTitle">黑夜降临</div>
+                            <div class="ww-table-phase-desc" id="phaseDesc">请所有人闭眼</div>
+                            <div class="ww-table-day-counter" id="dayCounter">第 1 天</div>
+                            <div class="ww-center-actions" id="centerActions"></div>
+                        </div>
+
+                        <!-- 玩家座位环 -->
+                        <div class="ww-table-ring" id="playerRing"></div>
+
+                        <!-- 圆桌边框装饰 -->
+                        <div class="ww-table-border"></div>
+                    </div>
+                </div>
+
+                <!-- 右侧：发言 & 消息面板 -->
+                <div class="ww-speech-panel">
+                    <div class="ww-speech-header">
+                        <span class="ww-speech-header-title">消息 / 发言</span>
+                        <span class="ww-speech-header-count" id="speechCount">0 条</span>
+                    </div>
+                    <div class="ww-speech-list" id="speechArea">
+                        <div class="ww-speech-empty">等待游戏开始...</div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- 底部日志 -->
+            <div class="ww-log-panel">
+                <div class="ww-log-header">
+                    <span>游戏日志</span>
+                    <button class="ww-log-toggle" onclick="toggleLog()">收起</button>
+                </div>
+                <div id="gameLog" class="ww-log"></div>
+            </div>
+
+        </div>
+    </div>
+
+    <script src="/static/js/werewolf.js?v=2026.06.10.1.1781231712"></script>
+</body>
+</html>

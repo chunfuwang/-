@@ -1,0 +1,24 @@
+# 本机密钥与私有配置
+.env
+.env.*
+!.env.example
+API/.env
+
+# 内置运行环境与第三方大型程序
+/python/
+/upscayl-2.9.8-win/
+
+# 用户数据、素材和运行输出
+/assets/
+/data/
+/output/
+/history.json
+/static/runninghub/api_providers.json
+
+# Python 与系统临时文件
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 24">
+  <rect x="2" y="2" width="20" height="20" rx="4" fill="#1A73E8"/>
+  <text x="12" y="17" text-anchor="middle" fill="white" font-size="13" font-weight="bold" font-family="Arial,sans-serif">M</text>
+  <text x="28" y="17" fill="#1C2633" font-size="14" font-weight="600" font-family="Arial,sans-serif">MiMo</text>
+</svg>
