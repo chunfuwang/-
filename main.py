@@ -218,6 +218,7 @@ LOCAL_UPLOAD_DIR = os.path.join(ASSETS_DIR, "uploads")
 HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
 API_ENV_FILE = os.path.join(BASE_DIR, "API", ".env")
 DATA_DIR = os.path.join(BASE_DIR, "data")
+VIDEO_TASK_RECOVERY_FILE = os.path.join(DATA_DIR, "video_task_recovery.json")
 CONVERSATION_DIR = os.path.join(DATA_DIR, "conversations")
 CANVAS_DIR = os.path.join(DATA_DIR, "canvases")
 MEDIA_PREVIEW_DIR = os.path.join(DATA_DIR, "media_previews")
@@ -235,6 +236,7 @@ RUNNINGHUB_THUMBNAIL_EXTS = (".jpg",)
 QUEUE = []
 QUEUE_LOCK = Lock()
 HISTORY_LOCK = Lock()
+VIDEO_TASK_RECOVERY_LOCK = Lock()
 GLOBAL_CONFIG_LOCK = Lock()
 CONVERSATION_LOCK = Lock()
 CANVAS_LOCK = Lock()
@@ -2376,6 +2378,11 @@ class CanvasVideoRequest(BaseModel):
     multimodal: bool = False
     trusted_asset: bool = False
 
+class CanvasVideoRecoveryRequest(BaseModel):
+    provider_id: str = ""
+    task_id: str = Field(min_length=1, max_length=240)
+    model: str = ""
+
 class TempShUploadRequest(BaseModel):
     url: str = ""
 
@@ -3162,6 +3169,28 @@ def extract_canvas_assets(canvas):
             continue
         node_id = str(node.get("id") or f"node_{node_index}")
         node_title = canvas_node_title(node)
+        # 提取节点的 prompt 和参考图（优先 runPrompt，其次 prompt/text）
+        node_prompt = str(node.get("runPrompt") or node.get("prompt") or node.get("text") or "").strip()
+        node_refs = []
+        # 优先从 runPromptRefs 获取参考图，其次从 inputRefs，最后从 references
+        raw_refs = None
+        for key in ("runPromptRefs", "inputRefs", "references"):
+            val = node.get(key)
+            if isinstance(val, list) and val:
+                raw_refs = val
+                break
+        if raw_refs:
+            for ref in raw_refs:
+                if isinstance(ref, dict) and ref.get("url"):
+                    node_refs.append({"url": ref["url"], "role": ref.get("role", "")})
+                elif isinstance(ref, str):
+                    node_refs.append({"url": ref, "role": ""})
+        # 提取生成参数（从 runSettings）
+        run_settings = node.get("runSettings") if isinstance(node.get("runSettings"), dict) else {}
+        node_model = str(run_settings.get("model") or node.get("model") or "").strip()
+        node_provider = str(run_settings.get("provider_id") or run_settings.get("apiProvider") or node.get("apiProvider") or "").strip()
+        node_size = str(run_settings.get("size") or run_settings.get("customSize") or "").strip()
+        node_quality = str(run_settings.get("quality") or "").strip()
         for field_path, raw, url in iter_canvas_asset_values(node):
             dedupe_key = url
             if dedupe_key in seen:
@@ -3190,6 +3219,18 @@ def extract_canvas_assets(canvas):
                 "source_path": field_path,
                 "created_at": node.get("created_at") or record.get("updated_at") or record.get("created_at") or 0,
             }
+            if node_prompt:
+                item["prompt"] = node_prompt
+            if node_refs:
+                item["reference_images"] = node_refs
+            if node_model:
+                item["model"] = node_model
+            if node_provider:
+                item["provider"] = node_provider
+            if node_size:
+                item["size"] = node_size
+            if node_quality:
+                item["quality"] = node_quality
             if isinstance(raw, dict):
                 for key in ("natural_w", "natural_h", "width", "height", "size", "duration", "runMs"):
                     if raw.get(key) is not None:
@@ -3291,6 +3332,111 @@ def log_net_error(context, exc, url=""):
             print(f"[NET-ERR] {context} | {type(exc).__name__}: {exc}", flush=True)
         except Exception:
             pass
+
+def system_curl_request(method, url, headers=None, json_body=None, data=None, files=None, timeout=1800):
+    """Use Windows' system TLS stack when the bundled Python TLS transport cannot connect."""
+    curl_exe = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl_exe:
+        raise RuntimeError("system curl is unavailable")
+    temp_root = tempfile.mkdtemp(prefix="lok_api_curl_")
+    try:
+        request_headers_path = os.path.join(temp_root, "request_headers.txt")
+        response_headers_path = os.path.join(temp_root, "response_headers.txt")
+        response_body_path = os.path.join(temp_root, "response_body.bin")
+        clean_headers = {
+            str(key): str(value)
+            for key, value in (headers or {}).items()
+            if str(key).lower() not in {"content-length", "host"}
+        }
+        with open(request_headers_path, "w", encoding="utf-8", newline="\n") as handle:
+            for key, value in clean_headers.items():
+                handle.write(f"{key}: {value}\n")
+        args = [
+            curl_exe,
+            "--silent", "--show-error", "--location",
+            "--connect-timeout", "20",
+            "--max-time", str(max(1, int(float(timeout or 1800)))),
+            "--request", str(method or "GET").upper(),
+            "--header", f"@{request_headers_path}",
+            "--dump-header", response_headers_path,
+            "--output", response_body_path,
+            "--write-out", "%{http_code}",
+            str(url),
+        ]
+        if json_body is not None:
+            request_body_path = os.path.join(temp_root, "request_body.json")
+            with open(request_body_path, "w", encoding="utf-8") as handle:
+                json.dump(json_body, handle, ensure_ascii=False)
+            args.extend(["--data-binary", f"@{request_body_path}"])
+        elif data is not None or files is not None:
+            for index, (field, value) in enumerate((data or {}).items()):
+                field_path = os.path.join(temp_root, f"field_{index}.txt")
+                with open(field_path, "w", encoding="utf-8") as handle:
+                    handle.write(str(value))
+                args.extend(["--form", f"{field}=<{field_path}"])
+            file_entries = list(files.items()) if isinstance(files, dict) else list(files or [])
+            for index, (field, spec) in enumerate(file_entries):
+                filename = "upload.bin"
+                content_type = "application/octet-stream"
+                source = spec
+                if isinstance(spec, tuple):
+                    filename = str(spec[0] or filename)
+                    source = spec[1] if len(spec) > 1 else b""
+                    content_type = str(spec[2] or content_type) if len(spec) > 2 else content_type
+                source_path = getattr(source, "name", "") if hasattr(source, "read") else ""
+                if not source_path:
+                    source_path = os.path.join(temp_root, f"upload_{index}.bin")
+                    content = source.read() if hasattr(source, "read") else source
+                    if isinstance(content, str):
+                        content = content.encode("utf-8")
+                    with open(source_path, "wb") as handle:
+                        handle.write(content or b"")
+                safe_filename = os.path.basename(filename).replace('"', "")
+                args.extend(["--form", f"{field}=@{source_path};filename={safe_filename};type={content_type}"])
+        completed = subprocess.run(args, capture_output=True, timeout=max(5, int(float(timeout or 1800)) + 10), check=False)
+        if completed.returncode != 0:
+            error = completed.stderr.decode("utf-8", "replace").strip()
+            raise RuntimeError(error or f"curl exited with code {completed.returncode}")
+        status_text = completed.stdout.decode("ascii", "ignore").strip()
+        status_code = int(status_text[-3:]) if len(status_text) >= 3 and status_text[-3:].isdigit() else 0
+        with open(response_body_path, "rb") as handle:
+            body = handle.read()
+        response_headers = {}
+        if os.path.exists(response_headers_path):
+            raw_headers = open(response_headers_path, "rb").read().decode("iso-8859-1", "replace")
+            blocks = [block for block in re.split(r"\r?\n\r?\n", raw_headers) if block.lstrip().startswith("HTTP/")]
+            if blocks:
+                for line in blocks[-1].splitlines()[1:]:
+                    if ":" in line:
+                        key, value = line.split(":", 1)
+                        response_headers[key.strip()] = value.strip()
+        request = httpx.Request(str(method or "GET").upper(), str(url))
+        return httpx.Response(status_code or 502, headers=response_headers, content=body, request=request)
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+async def request_with_system_curl_fallback(client, method, url, *, headers=None, json_body=None, data=None, files=None, timeout=1800, **kwargs):
+    try:
+        return await client.request(method, url, headers=headers, json=json_body, data=data, files=files, **kwargs)
+    except httpx.TransportError as primary_error:
+        log_net_error("Python TLS transport failed; trying Windows system TLS", primary_error, str(url))
+        try:
+            return await asyncio.to_thread(
+                system_curl_request,
+                method,
+                url,
+                headers,
+                json_body,
+                data,
+                files,
+                timeout,
+            )
+        except Exception as fallback_error:
+            request = httpx.Request(str(method or "GET").upper(), str(url))
+            raise httpx.ConnectError(
+                f"{primary_error}; Windows system TLS fallback failed: {fallback_error}",
+                request=request,
+            ) from primary_error
 
 def api_headers(json_body=True, provider=None, model=""):
     if provider:
@@ -3589,6 +3735,11 @@ def is_yuli_provider(provider):
     # 与通用 OpenAI /v1/videos/generations 不同，需单独识别。
     base_url = str((provider or {}).get("base_url") or "").lower()
     return "yuli.host" in base_url
+
+def is_zzdh_provider(provider):
+    """字字动画 H3 使用 /v8 异步任务接口，并通过带鉴权的 /v1/content 下载。"""
+    base_url = str((provider or {}).get("base_url") or "").lower()
+    return "zizidonghua.com" in base_url
 
 def is_agnes_provider(provider, model=""):
     base_url = str((provider or {}).get("base_url") or "").lower()
@@ -4382,6 +4533,37 @@ async def generate_jimeng_video(payload: CanvasVideoRequest, provider):
                 args.append(f"--model_version={model_version}")
         raw = await run_jimeng_cli(args, timeout=jimeng_poll_seconds() + 180)
         urls = await jimeng_store_outputs(raw, "video")
+        record = {
+            "prompt": payload.prompt,
+            "videos": urls,
+            "timestamp": time.time(),
+            "type": "video",
+            "video_type": "jimeng",
+            "model": payload.model,
+            "provider_id": provider["id"],
+            "provider_name": provider.get("name") or provider["id"],
+            "task_id": jimeng_submit_id(raw) or None,
+            "params": {
+                "provider_id": provider["id"],
+                "model": payload.model,
+                "duration": duration,
+                "aspect_ratio": payload.aspect_ratio,
+                "resolution": payload.resolution,
+                "reference_images": [{"url": ref.url, "role": ref.role} for ref in image_refs],
+                "reference_videos": video_refs,
+                "reference_audios": audio_refs,
+                "enhance_prompt": payload.enhance_prompt,
+                "enable_upsample": payload.enable_upsample,
+                "watermark": payload.watermark,
+                "seed": payload.seed,
+                "camerafixed": payload.camerafixed,
+                "generate_audio": payload.generate_audio,
+                "multimodal": payload.multimodal,
+            },
+        }
+        save_to_history(record)
+        if GLOBAL_LOOP:
+            asyncio.run_coroutine_threadsafe(manager.broadcast_new_image(record), GLOBAL_LOOP)
         return {"videos": urls, "task_id": jimeng_submit_id(raw) or None, "raw": raw}
     finally:
         for path in temp_paths:
@@ -4416,7 +4598,13 @@ def image_task_fail_reason(payload):
 
 async def fetch_image_task_payload(client, task_id, provider=None):
     task_url = image_task_url_for_provider(provider, task_id)
-    response = await client.get(task_url, headers=api_headers(provider=provider))
+    response = await request_with_system_curl_fallback(
+        client,
+        "GET",
+        task_url,
+        headers=api_headers(provider=provider),
+        timeout=300,
+    )
     response.raise_for_status()
     return response.json()
 
@@ -6378,7 +6566,46 @@ async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Di
 async def upload_local_video_to_temp_sh(ref_url: str) -> Dict[str, str]:
     return await upload_local_video_to_cloud(ref_url, "auto")
 
-async def save_ai_image_to_output(image_data, prefix="online_", category="output"):
+def normalize_saved_image_size(path, target_size=""):
+    width, height = parse_size_pair(target_size)
+    if not path or width <= 0 or height <= 0:
+        return False
+    temp_path = ""
+    try:
+        with Image.open(path) as source:
+            source_format = str(source.format or "PNG").upper()
+            image = ImageOps.exif_transpose(source)
+            if image.size == (width, height):
+                return False
+            fitted = ImageOps.fit(
+                image,
+                (width, height),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            suffix = os.path.splitext(path)[1] or ".png"
+            temp_path = f"{path}.{uuid.uuid4().hex[:8]}.ratio{suffix}"
+            save_kwargs = {}
+            if source_format in {"JPEG", "JPG"}:
+                fitted = fitted.convert("RGB")
+                source_format = "JPEG"
+                save_kwargs = {"quality": 95, "subsampling": 0}
+            elif source_format == "WEBP":
+                save_kwargs = {"quality": 95, "method": 6}
+            fitted.save(temp_path, format=source_format, **save_kwargs)
+        os.replace(temp_path, path)
+        return True
+    except Exception as exc:
+        print(f"校正生图尺寸失败 target={target_size}: {exc}", flush=True)
+        return False
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+async def save_ai_image_to_output(image_data, prefix="online_", category="output", target_size=""):
     filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
     path = output_path_for(filename, category)
     if image_data["type"] == "b64":
@@ -6391,6 +6618,7 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
             path = output_path_for(filename, category)
         with open(path, "wb") as f:
             f.write(base64.b64decode(image_data["value"]))
+        normalize_saved_image_size(path, target_size)
         return output_url_for(filename, category)
     value = image_data["value"]
     if value.startswith("/output/") or value.startswith("/assets/"):
@@ -6398,7 +6626,7 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
     try:
         timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            response = await client.get(value)
+            response = await request_with_system_curl_fallback(client, "GET", value, timeout=300)
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "")
             if "jpeg" in content_type or "jpg" in content_type:
@@ -6409,12 +6637,13 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
                 path = output_path_for(filename, category)
             with open(path, "wb") as f:
                 f.write(response.content)
+            normalize_saved_image_size(path, target_size)
             return output_url_for(filename, category)
     except Exception as e:
         print(f"保存上游图片失败: {e}")
         return value
 
-async def save_remote_video_to_output(url, prefix="video_", category="output"):
+async def save_remote_video_to_output(url, prefix="video_", category="output", headers=None):
     if not url:
         return ""
     if url.startswith("/output/") or url.startswith("/assets/"):
@@ -6422,8 +6651,14 @@ async def save_remote_video_to_output(url, prefix="video_", category="output"):
     filename = f"{prefix}{uuid.uuid4().hex[:10]}.mp4"
     path = output_path_for(filename, category)
     try:
-        async with httpx.AsyncClient(timeout=VIDEO_POLL_TIMEOUT) as client:
-            response = await client.get(url)
+        async with httpx.AsyncClient(timeout=VIDEO_POLL_TIMEOUT, follow_redirects=True) as client:
+            response = await request_with_system_curl_fallback(
+                client,
+                "GET",
+                url,
+                headers=headers or None,
+                timeout=VIDEO_POLL_TIMEOUT,
+            )
             response.raise_for_status()
             content_type = (response.headers.get("Content-Type") or "").lower()
             clean_path = urllib.parse.urlparse(url).path
@@ -7488,11 +7723,23 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart or image_request_mode == "openai-json") else AI_REQUEST_TIMEOUT
     async with httpx.AsyncClient(timeout=request_timeout) as client:
         response = None
+        async def post_compatible(url, *, headers=None, json_body=None, data=None, files=None):
+            return await request_with_system_curl_fallback(
+                client,
+                "POST",
+                url,
+                headers=headers,
+                json_body=json_body,
+                data=data,
+                files=files,
+                timeout=1800,
+            )
+
         async def post_openai_edits(edit_files=None):
             data = {"model": model, "prompt": prompt, "size": size}
             if quality:
                 data["quality"] = quality
-            return await client.post(
+            return await post_compatible(
                 edit_url,
                 headers=api_headers(json_body=False, provider=provider, model=model),
                 data=data,
@@ -7507,7 +7754,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             if image_refs:
                 extra_body["image"] = [reference_to_data_url(ref, max_size=1536) for ref in image_refs[:16]]
             body = {"model": model, "prompt": prompt, "size": size, "extra_body": extra_body}
-            response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+            response = await post_compatible(gen_url, headers=api_headers(provider=provider, model=model), json_body=body)
         elif is_apimart:
             apimart_size, resolution = apimart_size_resolution(size)
             # APIMart 的 GPT-Image-2 图生图仍走 /images/generations，
@@ -7522,12 +7769,12 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             }
             if image_refs:
                 body["image_urls"] = [reference_to_data_url(ref, max_size=1536) for ref in image_refs[:16]]
-            response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+            response = await post_compatible(gen_url, headers=api_headers(provider=provider, model=model), json_body=body)
         elif is_gpt2 and not image_refs and not mask_refs:
             body = {"model": model, "prompt": prompt, "size": size}
             if quality:
                 body["quality"] = quality
-            response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+            response = await post_compatible(gen_url, headers=api_headers(provider=provider, model=model), json_body=body)
             if response.status_code >= 400 and images_api_unsupported(response):
                 response = await post_openai_edits()
         elif image_refs:
@@ -7580,7 +7827,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 }
                 if quality:
                     body["quality"] = quality
-                response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+                response = await post_compatible(gen_url, headers=api_headers(provider=provider, model=model), json_body=body)
                 if response.status_code >= 400 and images_api_unsupported(response):
                     raise HTTPException(
                         status_code=502,
@@ -7590,10 +7837,10 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             body = {"model": model, "prompt": prompt, "size": size, "response_format": "url", "n": 1}
             if quality:
                 body["quality"] = quality
-            response = await client.post(
+            response = await post_compatible(
                 gen_url,
                 headers=api_headers(provider=provider, model=model),
-                json=body,
+                json_body=body,
             )
             if response.status_code >= 400 and images_api_unsupported(response):
                 response = await post_openai_edits()
@@ -9268,7 +9515,13 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
     url = upstream_models_url(base_url, protocol)
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url, headers=upstream_model_headers(api_key, protocol))
+            resp = await request_with_system_curl_fallback(
+                client,
+                "GET",
+                url,
+                headers=upstream_model_headers(api_key, protocol),
+                timeout=30,
+            )
             endpoint_label = "/v1beta/models" if protocol == "gemini" else "/api/v3/models" if protocol == "volcengine" else "/openapi/v2/models" if protocol == "runninghub" else "/v1/models"
             if resp.status_code in (301, 302, 303, 307, 308):
                 location = resp.headers.get("Location") or resp.headers.get("location") or ""
@@ -9388,6 +9641,8 @@ async def build_online_image_result(payload: OnlineImageRequest):
     count = max(1, min(8, int(payload.n or 1)))
     async def generate_one():
         image_data, raw_item = await generate_ai_image(payload.prompt, payload.size, payload.quality, model, image_refs, provider["id"])
+        # 画布图片生成节点保留上游返回的原始文件，不按请求尺寸二次裁切或重编码。
+        # 请求尺寸只用于告诉模型期望比例；上游实际返回多大，就原样保存多大。
         local_url = await save_ai_image_to_output(image_data, prefix="online_")
         return local_url, raw_item
     try:
@@ -9645,6 +9900,8 @@ def looks_like_html_response(text: str) -> bool:
 def video_submit_url_candidates(provider, base_url):
     if is_agnes_provider(provider):
         return [f"{base_url}/v1/videos"]
+    if is_zzdh_provider(provider):
+        return [f"{base_url}/v8/videos/generations"]
     if is_apimart_provider(provider):
         return [f"{base_url}/videos/generations" if base_url.endswith("/v1") else f"{base_url}/v1/videos/generations"]
     if is_volcengine_provider(provider):
@@ -9663,6 +9920,9 @@ def video_task_url_candidates(provider, base_url, task_id, submit_url=""):
             f"{base_url}/agnesapi?{urllib.parse.urlencode({'video_id': task_id})}",
             f"{base_url}/v1/videos/{quoted_id}",
         ]
+    if is_zzdh_provider(provider):
+        quoted_id = urllib.parse.quote(str(task_id), safe="")
+        return [f"{base_url}/v8/videos/generations/{quoted_id}"]
     if is_apimart_provider(provider):
         task_path = f"{base_url}/tasks/{task_id}" if base_url.endswith("/v1") else f"{base_url}/v1/tasks/{task_id}"
         return [f"{task_path}?language=zh"]
@@ -9690,6 +9950,59 @@ VIDEO_TASK_FAILURE_STATUSES = {
     "FAILURE", "FAILED", "FAIL", "ERROR", "ERRORED",
     "CANCELED", "CANCELLED", "TIMEOUT", "TIMEDOUT", "REJECTED", "EXPIRED",
 }
+
+def remember_video_task(task_id, provider, model="", prompt="", submit_url="", status="submitted", **extra):
+    """Persist asynchronous video task IDs before polling so a transport failure never loses a paid job."""
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return
+    with VIDEO_TASK_RECOVERY_LOCK:
+        records = {}
+        try:
+            if os.path.exists(VIDEO_TASK_RECOVERY_FILE):
+                with open(VIDEO_TASK_RECOVERY_FILE, "r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                    if isinstance(loaded, dict):
+                        records = loaded
+        except Exception:
+            records = {}
+        current = records.get(task_id) if isinstance(records.get(task_id), dict) else {}
+        current.update({
+            "task_id": task_id,
+            "provider_id": str((provider or {}).get("id") or ""),
+            "provider_name": str((provider or {}).get("name") or (provider or {}).get("id") or ""),
+            "model": str(model or current.get("model") or ""),
+            "prompt": str(prompt or current.get("prompt") or ""),
+            "submit_url": str(submit_url or current.get("submit_url") or ""),
+            "status": str(status or current.get("status") or "submitted"),
+            "updated_at": time.time(),
+        })
+        if "created_at" not in current:
+            current["created_at"] = time.time()
+        for key, value in extra.items():
+            if value is not None:
+                current[str(key)] = value
+        records[task_id] = current
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(VIDEO_TASK_RECOVERY_FILE, "w", encoding="utf-8") as handle:
+            json.dump(records, handle, ensure_ascii=False, indent=2)
+
+def get_video_task_record(task_id):
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return {}
+    with VIDEO_TASK_RECOVERY_LOCK:
+        try:
+            with open(VIDEO_TASK_RECOVERY_FILE, "r", encoding="utf-8") as handle:
+                records = json.load(handle)
+            record = records.get(task_id) if isinstance(records, dict) else None
+            return dict(record) if isinstance(record, dict) else {}
+        except Exception:
+            return {}
+
+def video_transport_error_detail(exc) -> str:
+    text = str(exc or "").strip()
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 def humanize_video_task_failure(reason) -> str:
     """把上游视频任务的失败原因转成对用户友好的中文提示。
@@ -9725,38 +10038,59 @@ async def wait_for_video_task(client, provider, task_id, submit_url=""):
     deadline = time.monotonic() + VIDEO_POLL_TIMEOUT
     delay = max(2.0, IMAGE_POLL_INTERVAL)
     last_payload = {}
+    last_error = None
     while time.monotonic() < deadline:
         await asyncio.sleep(delay)
         raw = None
-        last_error = None
         for task_url in task_urls:
             try:
-                response = await client.get(task_url, headers=api_headers(provider=provider))
+                response = await request_with_system_curl_fallback(
+                    client,
+                    "GET",
+                    task_url,
+                    headers=api_headers(provider=provider),
+                    timeout=VIDEO_POLL_TIMEOUT,
+                )
                 response.raise_for_status()
                 raw = response.json()
                 break
             except Exception as exc:
                 last_error = exc
+                log_net_error(f"视频任务轮询失败 task_id={task_id}", exc, task_url)
                 continue
         if raw is None:
-            if last_error:
-                raise last_error
-            raise HTTPException(status_code=502, detail=f"视频任务查询失败：{task_id}")
+            # 异步任务已在上游运行，单次网络/TLS 抖动不能终止轮询，否则会造成
+            # “平台已经生成完成，但本地拿不到结果”。保留 task_id 并继续重试到总超时。
+            remember_video_task(
+                task_id,
+                provider,
+                status="polling",
+                last_error=video_transport_error_detail(last_error) if last_error else "",
+            )
+            delay = min(delay * 1.6, 12)
+            continue
         last_payload = raw
         task_data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
         status = str(task_data.get("status") or task_data.get("task_status") or raw.get("status") or raw.get("task_status") or "").upper()
         if status in VIDEO_TASK_SUCCESS_STATUSES:
+            remember_video_task(task_id, provider, status="completed_upstream")
             return raw
         # 部分上游（如玉玉API）status 字段非标准或为空，但已经返回了视频 URL ——
         # 只要不是明确的失败状态，且拿到了真实视频地址，就直接当成功处理。
         if status not in VIDEO_TASK_FAILURE_STATUSES and video_output_urls(raw):
+            remember_video_task(task_id, provider, status="completed_upstream")
             return raw
         if status in VIDEO_TASK_FAILURE_STATUSES:
             error = task_data.get("error") if isinstance(task_data.get("error"), dict) else {}
             reason = task_data.get("fail_reason") or task_data.get("message") or error.get("message") or raw.get("error") or raw.get("message") or str(raw)
             raise HTTPException(status_code=502, detail=humanize_video_task_failure(reason))
         delay = min(delay * 1.6, 12)
-    raise HTTPException(status_code=504, detail=f"视频生成任务超时：{last_payload or task_id}")
+    error_hint = f"；最后错误：{video_transport_error_detail(last_error)}" if last_error else ""
+    remember_video_task(task_id, provider, status="recovery_needed", last_error=error_hint.lstrip("；"))
+    raise HTTPException(
+        status_code=504,
+        detail=f"视频任务仍在上游运行或已完成，但本地轮询超时。task_id={task_id}{error_hint}。可使用该 task_id 恢复下载，请勿重新提交生成。",
+    )
 
 def apimart_video_size(size):
     value = str(size or "16:9").strip()
@@ -9764,6 +10098,65 @@ def apimart_video_size(size):
         return "adaptive"
     allowed = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"}
     return value if value in allowed else "16:9"
+
+def zzdh_video_duration(duration) -> int:
+    try:
+        value = int(duration)
+    except Exception:
+        value = 5
+    return max(5, min(15, value))
+
+def zzdh_video_aspect_ratio(aspect_ratio) -> str:
+    value = str(aspect_ratio or "16:9").strip()
+    allowed = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}
+    return value if value in allowed else "16:9"
+
+def zzdh_media_reference_url(value, max_image_size=None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return media_reference_to_url(text, max_image_size=max_image_size)
+
+def zzdh_video_body(payload, requested_model) -> Dict[str, Any]:
+    body = {
+        "model": selected_model(requested_model, "zzdh-Minimax-h3-720p"),
+        "prompt": str(payload.prompt or "")[:10000],
+        "aspect_ratio": zzdh_video_aspect_ratio(payload.aspect_ratio),
+        "duration": zzdh_video_duration(payload.duration),
+        "fps": 24,
+    }
+    images = []
+    frame_mode = not bool(payload.multimodal)
+    for index, ref in enumerate((payload.images or [])[:9]):
+        url = zzdh_media_reference_url(getattr(ref, "url", ""), max_image_size=1536)
+        if not url:
+            continue
+        if frame_mode:
+            role = "first_frame" if index == 0 else "last_frame"
+        else:
+            # 全能参考必须显式标记 reference_image。H3 会把 1~2 张未标角色的图片
+            # 自动解释为首/尾帧，导致人物身份参考不稳定。
+            role = "reference_image"
+        images.append({"url": url, "role": role})
+    videos = [
+        {"url": url}
+        for url in (zzdh_media_reference_url(value) for value in (payload.videos or [])[:3])
+        if url
+    ]
+    audios = [
+        {"url": url}
+        for url in (zzdh_media_reference_url(value) for value in (payload.audios or [])[:3])
+        if url
+    ]
+    if frame_mode and (videos or audios):
+        raise HTTPException(status_code=400, detail="字字 H3 的首尾帧模式不能同时使用参考视频或参考音频，请切换为全能参考模式。")
+    if images:
+        body["reference_images"] = images
+    if videos:
+        body["reference_videos"] = videos
+    if audios:
+        body["reference_audios"] = audios
+    return body
 
 def agnes_video_dimensions(aspect_ratio="", resolution=""):
     ratio = str(aspect_ratio or "16:9").strip()
@@ -10012,6 +10405,7 @@ async def canvas_video(payload: CanvasVideoRequest):
     is_apimart = is_apimart_provider(provider)
     is_volcengine = is_volcengine_provider(provider)
     is_yuli = is_yuli_provider(provider)
+    is_zzdh = is_zzdh_provider(provider)
     is_agnes = is_agnes_provider(provider, payload.model)
     volc_is_proxy = bool(is_volcengine and urllib.parse.urlparse(base_url).path.rstrip("/"))
     submit_urls = video_submit_url_candidates(provider, base_url)
@@ -10040,6 +10434,7 @@ async def canvas_video(payload: CanvasVideoRequest):
         except httpx.HTTPError as exc:
             log_net_error(f"视频(玉玉) 网络/TLS错误 model={requested_model}", exc)
             raise HTTPException(status_code=502, detail=f"请求上游视频接口失败：{exc}") from exc
+    task_id = ""
     try:
         async with httpx.AsyncClient(timeout=VIDEO_POLL_TIMEOUT) as client:
             # --- 构造图片载荷 ---
@@ -10163,7 +10558,9 @@ async def canvas_video(payload: CanvasVideoRequest):
                         body["generate_audio"] = True
             else:
                 # 非 APIMart：data URL 方式（OpenAI / ComflyAI 接口）
-                if is_volcengine and not volc_is_proxy:
+                if is_zzdh:
+                    body = zzdh_video_body(payload, requested_model)
+                elif is_volcengine and not volc_is_proxy:
                     text = str(payload.prompt or "").strip()
                     volc_model = selected_model(payload.model, "doubao-seedance-2-0-fast-260128")
                     body = {
@@ -10352,13 +10749,78 @@ async def canvas_video(payload: CanvasVideoRequest):
                     )
                 ) from last_json_error
             task_id = extract_task_id(raw) or raw.get("task_id") or raw.get("id")
+            if task_id:
+                remember_video_task(
+                    task_id,
+                    provider,
+                    model=requested_model,
+                    prompt=payload.prompt,
+                    submit_url=submit_url,
+                    status="submitted",
+                )
             result = raw
             if task_id and not video_output_urls(raw):
                 result = await wait_for_video_task(client, provider, task_id, submit_url)
             urls = video_output_urls(result)
-            if not urls:
+            if is_zzdh and task_id:
+                quoted_id = urllib.parse.quote(str(task_id), safe="")
+                content_url = f"{base_url}/v1/videos/{quoted_id}/content"
+                download_headers = api_headers(json_body=False, provider=provider, model=requested_model)
+                download_headers["Accept"] = "video/*,application/octet-stream"
+                local_url = await save_remote_video_to_output(
+                    content_url,
+                    prefix="zzdh_h3_",
+                    headers=download_headers,
+                )
+                if not str(local_url or "").startswith(("/output/", "/assets/")):
+                    raise HTTPException(status_code=502, detail="字字 H3 任务已完成，但视频文件下载失败。请检查 API Key 权限或稍后重试。")
+                local_urls = [local_url]
+            elif not urls:
                 raise HTTPException(status_code=502, detail=f"视频生成成功但没有返回视频：{result}")
-            local_urls = [await save_remote_video_to_output(url) for url in urls]
+            else:
+                local_urls = [await save_remote_video_to_output(url) for url in urls]
+            if task_id:
+                remember_video_task(
+                    task_id,
+                    provider,
+                    model=requested_model,
+                    prompt=payload.prompt,
+                    submit_url=submit_url,
+                    status="downloaded",
+                    videos=local_urls,
+                )
+            record = {
+                "prompt": payload.prompt,
+                "videos": local_urls,
+                "timestamp": time.time(),
+                "type": "video",
+                "video_type": "canvas",
+                "model": requested_model,
+                "provider_id": provider["id"],
+                "provider_name": provider.get("name") or provider["id"],
+                "task_id": task_id or None,
+                "params": {
+                    "provider_id": provider["id"],
+                    "model": requested_model,
+                    "duration": payload.duration,
+                    "aspect_ratio": payload.aspect_ratio or payload.size,
+                    "resolution": payload.resolution,
+                    "reference_images": [{"url": ref.url, "role": ref.role or ""} for ref in (payload.images or []) if ref.url],
+                    "reference_videos": payload.videos or [],
+                    "reference_audios": payload.audios or [],
+                    "enhance_prompt": payload.enhance_prompt,
+                    "enable_upsample": payload.enable_upsample,
+                    "watermark": payload.watermark,
+                    "seed": payload.seed,
+                    "camerafixed": payload.camerafixed,
+                    "return_last_frame": payload.return_last_frame,
+                    "generate_audio": payload.generate_audio,
+                    "multimodal": payload.multimodal,
+                },
+            }
+            save_to_history(record)
+            if GLOBAL_LOOP:
+                asyncio.run_coroutine_threadsafe(manager.broadcast_new_image(record), GLOBAL_LOOP)
             return {"videos": local_urls, "task_id": task_id, "raw": result}
     except httpx.HTTPStatusError as exc:
         text = exc.response.text
@@ -10410,7 +10872,81 @@ async def canvas_video(payload: CanvasVideoRequest):
         raise HTTPException(status_code=exc.response.status_code, detail=f"上游视频接口错误：{text}") from exc
     except httpx.HTTPError as exc:
         log_net_error(f"视频 网络/TLS错误 provider={provider.get('id')} model={payload.model}", exc)
-        raise HTTPException(status_code=502, detail=f"请求上游视频接口失败：{exc}") from exc
+        if task_id:
+            detail = video_transport_error_detail(exc)
+            remember_video_task(task_id, provider, model=payload.model, prompt=payload.prompt, status="recovery_needed", last_error=detail)
+            raise HTTPException(
+                status_code=502,
+                detail=f"视频任务已经提交，但拉取结果时网络中断。task_id={task_id}；错误：{detail}。请使用该 task_id 恢复下载，不要重新生成。",
+            ) from exc
+        raise HTTPException(status_code=502, detail=f"请求上游视频接口失败：{video_transport_error_detail(exc)}") from exc
+
+@app.post("/api/canvas-video/recover")
+async def recover_canvas_video(payload: CanvasVideoRecoveryRequest):
+    """Resume polling/downloading an already submitted asynchronous video task without generating again."""
+    task_id = str(payload.task_id or "").strip()
+    saved = get_video_task_record(task_id)
+    provider_id = str(payload.provider_id or saved.get("provider_id") or "").strip()
+    if not provider_id:
+        raise HTTPException(status_code=400, detail="缺少 provider_id，无法恢复视频任务。")
+    provider = get_api_provider(provider_id)
+    model = selected_model(payload.model or saved.get("model"), "zzdh-Minimax-h3-720p")
+    base_url = video_api_root(provider)
+    submit_url = str(saved.get("submit_url") or "")
+    remember_video_task(task_id, provider, model=model, prompt=saved.get("prompt") or "", submit_url=submit_url, status="recovering")
+    try:
+        timeout = httpx.Timeout(connect=20.0, read=VIDEO_POLL_TIMEOUT, write=60.0, pool=20.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            result = await wait_for_video_task(client, provider, task_id, submit_url)
+        urls = video_output_urls(result)
+        if is_zzdh_provider(provider):
+            quoted_id = urllib.parse.quote(task_id, safe="")
+            content_url = f"{base_url}/v1/videos/{quoted_id}/content"
+            headers = api_headers(json_body=False, provider=provider, model=model)
+            headers["Accept"] = "video/*,application/octet-stream"
+            local_url = await save_remote_video_to_output(content_url, prefix="zzdh_h3_", headers=headers)
+            if not str(local_url or "").startswith(("/output/", "/assets/")):
+                raise HTTPException(status_code=502, detail=f"任务 {task_id} 已完成，但视频文件下载失败。")
+            local_urls = [local_url]
+        else:
+            if not urls:
+                raise HTTPException(status_code=502, detail=f"任务 {task_id} 已完成，但没有返回视频地址。")
+            local_urls = [await save_remote_video_to_output(url) for url in urls]
+        remember_video_task(
+            task_id,
+            provider,
+            model=model,
+            prompt=saved.get("prompt") or "",
+            submit_url=submit_url,
+            status="downloaded",
+            videos=local_urls,
+        )
+        record = {
+            "prompt": saved.get("prompt") or "",
+            "videos": local_urls,
+            "timestamp": time.time(),
+            "type": "video",
+            "video_type": "canvas",
+            "model": model,
+            "provider_id": provider["id"],
+            "provider_name": provider.get("name") or provider["id"],
+            "task_id": task_id,
+            "params": {"provider_id": provider["id"], "model": model, "recovered": True},
+        }
+        save_to_history(record)
+        if GLOBAL_LOOP:
+            asyncio.run_coroutine_threadsafe(manager.broadcast_new_image(record), GLOBAL_LOOP)
+        return {"videos": local_urls, "task_id": task_id, "raw": result, "recovered": True}
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as exc:
+        text = (exc.response.text or "")[:800]
+        remember_video_task(task_id, provider, model=model, status="recovery_needed", last_error=text)
+        raise HTTPException(status_code=exc.response.status_code, detail=f"恢复视频任务失败：{text}") from exc
+    except httpx.HTTPError as exc:
+        detail = video_transport_error_detail(exc)
+        remember_video_task(task_id, provider, model=model, status="recovery_needed", last_error=detail)
+        raise HTTPException(status_code=502, detail=f"恢复视频任务时网络中断：{detail}；task_id={task_id}") from exc
 
 # --- Canvas LLM ---
 
@@ -11686,7 +12222,7 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
         image_size = chat_prompt_size_override(payload.message, payload.size) or payload.size
         try:
             image_data, raw = await generate_ai_image(payload.message, image_size, payload.quality, model, image_refs, provider["id"])
-            local_url = await save_ai_image_to_output(image_data, prefix="chat_")
+            local_url = await save_ai_image_to_output(image_data, prefix="chat_", target_size=image_size)
         except httpx.HTTPStatusError as exc:
             text = exc.response.text or ""
             detail = friendly_image_error_detail(text, image_size, model) or f"上游生图接口错误：{text[:300]}"
@@ -11833,7 +12369,7 @@ async def chat_agent(payload: ChatRequest, request: Request, x_user_id: str = He
         try:
             for item_prompt in prompts:
                 image_data, raw = await generate_ai_image(item_prompt, image_size, payload.quality, model, tool_refs, image_provider["id"])
-                local_urls.append(await save_ai_image_to_output(image_data, prefix="chat_"))
+                local_urls.append(await save_ai_image_to_output(image_data, prefix="chat_", target_size=image_size))
                 raw_items.append(raw)
         except httpx.HTTPStatusError as exc:
             text = exc.response.text or ""
@@ -11964,14 +12500,21 @@ async def chat_stream(payload: ChatRequest, request: Request, x_user_id: str = H
 # --- 历史记录 ---
 
 @app.get("/api/history")
-async def get_history_api(type: str = None):
+async def get_history_api(type: str = None, media_type: str = None):
     if os.path.exists(HISTORY_FILE):
         try:
             with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if type:
                     data = [item for item in data if item.get("type", "zimage") == type]
-                data = [item for item in data if item.get("images") and len(item["images"]) > 0]
+                # 按媒体类型过滤：image=仅含图片的，video=仅含视频的，否则全部
+                if media_type == "image":
+                    data = [item for item in data if item.get("images") and len(item["images"]) > 0]
+                elif media_type == "video":
+                    data = [item for item in data if item.get("videos") and len(item["videos"]) > 0]
+                else:
+                    # 全部：有图片或有视频的
+                    data = [item for item in data if (item.get("images") and len(item["images"]) > 0) or (item.get("videos") and len(item["videos"]) > 0)]
 
                 def sort_key(item):
                     ts = item.get("timestamp", 0)

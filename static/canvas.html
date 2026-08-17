@@ -20,7 +20,7 @@
     <script src="/static/vendor/js/lucide.js?v=2026.06.10.1.1781140972"></script>
     <script src="/static/js/theme.js?v=2026.06.10.1.1781140970"></script>
     <script src="/static/js/i18n.js?v=2026.06.10.1.1781142618"></script>
-    <link rel="stylesheet" href="/static/css/canvas.css?v=2026.06.10.1.1786633164">
+    <link rel="stylesheet" href="/static/css/canvas.css?v=2026.06.10.1.1786956311">
     <link rel="stylesheet" href="/static/css/theme.css?v=2026.06.10.1.1781140970">
 </head>
 <body>
@@ -112,15 +112,37 @@
                         <span class="add-node-palette-icon" aria-hidden="true"><i data-lucide="orbit"></i></span><span class="add-node-palette-label">3D 导演台</span><span class="add-node-badge add-node-badge-new">新</span>
                     </button>
                 </div>
-                <button class="menu-btn" onclick="menuAdd('prompt')"><i data-lucide="text-cursor-input" class="w-4 h-4"></i><span data-i18n="canvas.prompt">提示词</span></button>
-                <button class="menu-btn" onclick="menuAdd('loop')"><i data-lucide="repeat-2" class="w-4 h-4"></i><span data-i18n="canvas.loopNode">循环节点</span></button>
-                <button class="menu-btn" onclick="menuAdd('llm')"><i data-lucide="message-square-text" class="w-4 h-4"></i><span data-i18n="canvas.llmNode">LLM 节点</span></button>
-                <button class="menu-btn" onclick="menuAdd('generator')"><i data-lucide="wand-sparkles" class="w-4 h-4"></i><span data-i18n="canvas.apiGenerate">API生成</span></button>
-                <button class="menu-btn" onclick="menuAdd('msgen')"><i data-lucide="cloud-lightning" class="w-4 h-4"></i><span data-i18n="canvas.modelscopeGenerate">Modelscope生成</span></button>
+                <button id="createNodeMenuToggle" class="menu-btn add-node-menu-toggle" type="button" aria-haspopup="true" aria-expanded="false" onclick="toggleCreateNodeDrawer(event)">
+                    <i data-lucide="layout-grid" class="w-4 h-4"></i><span>创作节点</span><i data-lucide="chevron-right" class="w-4 h-4 add-node-menu-chevron"></i>
+                </button>
+                <div id="createNodeDrawer" class="add-node-palette create-node-palette" aria-label="创作节点">
+                    <div class="add-node-palette-title">创作节点</div>
+                    <button class="add-node-palette-item" type="button" data-drawer-node="prompt">
+                        <span class="add-node-palette-icon" aria-hidden="true"><i data-lucide="text-cursor-input"></i></span><span class="add-node-palette-label">提示词</span>
+                    </button>
+                    <button class="add-node-palette-item" type="button" data-drawer-node="loop">
+                        <span class="add-node-palette-icon" aria-hidden="true"><i data-lucide="repeat-2"></i></span><span class="add-node-palette-label">循环节点</span>
+                    </button>
+                    <button class="add-node-palette-item" type="button" data-drawer-node="llm">
+                        <span class="add-node-palette-icon" aria-hidden="true"><i data-lucide="message-square-text"></i></span><span class="add-node-palette-label">LLM 节点</span>
+                    </button>
+                    <button class="add-node-palette-item" type="button" data-drawer-node="generator">
+                        <span class="add-node-palette-icon" aria-hidden="true"><i data-lucide="wand-sparkles"></i></span><span class="add-node-palette-label">API 生成</span>
+                    </button>
+                    <button class="add-node-palette-item" type="button" data-drawer-node="msgen">
+                        <span class="add-node-palette-icon" aria-hidden="true"><i data-lucide="cloud-lightning"></i></span><span class="add-node-palette-label">Modelscope 生成</span>
+                    </button>
+                    <button class="add-node-palette-item" type="button" data-drawer-node="rh">
+                        <span class="add-node-palette-icon" aria-hidden="true"><i data-lucide="workflow"></i></span><span class="add-node-palette-label">RunningHub 生成</span>
+                    </button>
+                    <button class="add-node-palette-item" type="button" data-drawer-node="comfy">
+                        <span class="add-node-palette-icon" aria-hidden="true"><i data-lucide="workflow"></i></span><span class="add-node-palette-label">ComfyUI 生成</span>
+                    </button>
+                    <button class="add-node-palette-item" type="button" data-drawer-node="ltxDirector">
+                        <span class="add-node-palette-icon" aria-hidden="true"><i data-lucide="film"></i></span><span class="add-node-palette-label">LTX Director</span>
+                    </button>
+                </div>
                 <button class="menu-btn" onclick="menuAdd('video')"><i data-lucide="clapperboard" class="w-4 h-4"></i><span data-i18n="canvas.videoGenerateNode">视频生成</span></button>
-                <button class="menu-btn" onclick="menuAdd('rh')"><i data-lucide="workflow" class="w-4 h-4"></i><span data-i18n="canvas.rhGenerate">RH生成</span></button>
-                <button class="menu-btn" onclick="menuAdd('comfy')"><i data-lucide="workflow" class="w-4 h-4"></i><span data-i18n="canvas.comfyGenerate">ComfyUI 生成</span></button>
-                <button class="menu-btn" onclick="menuAdd('ltxDirector')"><i data-lucide="film" class="w-4 h-4"></i><span data-i18n="canvas.ltxDirector">LTX Director</span></button>
                 <button class="menu-btn" onclick="menuAdd('output')"><i data-lucide="circle-dot" class="w-4 h-4"></i>Output</button>
             </div>
             <div id="linkCreateMenu" class="create-menu"></div>
@@ -186,7 +208,6 @@
                 <div class="canvas-asset-hover-name"></div>
             </div>
         </div>
-        <div class="hint editor-only" data-i18n="canvas.hint">拖拽画布或按住滚轮移动，Ctrl 框选多选，拖动选中节点可一起移动。图片/提示词节点右下端口拖线到生成节点。</div>
         <div id="outputLightbox" class="output-lightbox" onclick="closeOutputLightbox()">
             <div id="outputLightboxShell" class="output-lightbox-shell" onclick="event.stopPropagation()">
             <div id="outputPreview" class="output-preview">
@@ -370,6 +391,6 @@
     </div>
 
     <script src="/static/js/ltx-director-timeline.js?v=2026.06.10.1.1781140970"></script>
-    <script src="/static/js/canvas.js?v=2026.06.10.1.1786632803"></script>
+    <script src="/static/js/canvas.js?v=2026.06.10.1.1786956674"></script>
 </body>
 </html>

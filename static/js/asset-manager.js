@@ -75,6 +75,13 @@ let selectedCanvasAssetIds = new Set();
 let canvasAssetQuery = '';
 let canvasAssetSort = 'canvas_asc';
 let canvasAssetManageMode = false;
+// 历史记录相关状态
+let historyMediaTab = 'image'; // 'image' | 'video'
+let historyImageData = [];
+let historyVideoData = [];
+let historyLoaded = false;
+let historyQuery = '';
+let historyDetailItem = null;
 
 const LOCAL_MEDIA_EXTS = /\.(png|jpe?g|webp|gif|bmp|avif|svg|mp4|webm|mov|m4v|mp3|wav|flac|ogg|m4a|aac)(\?|#|$)/i;
 
@@ -710,13 +717,15 @@ function normalizeCanvasAssetState(){
 }
 async function loadAll(){
     setStatus('加载中...');
-    const [assetData, promptData, providerData, canvasAssetData] = await Promise.all([
+    const [assetData, promptData, providerData, canvasAssetData, _shared, _local, imgHistory, vidHistory] = await Promise.all([
         apiJson('/api/asset-library'),
         apiJson('/api/prompt-libraries'),
         apiJson('/api/providers').catch(() => ({providers:[]})),
         apiJson('/api/canvas-assets').catch(() => ({categories:[], canvases:[], items:[]})),
         loadSharedFolders(),
-        loadLocalAssets()
+        loadLocalAssets(),
+        apiJson('/api/history?media_type=image').catch(() => []),
+        apiJson('/api/history?media_type=video').catch(() => [])
     ]);
     assetLibrary = assetData.library || {libraries:[], categories:[]};
     promptLibrary = promptData.library || {libraries:[]};
@@ -726,6 +735,9 @@ async function loadAll(){
         canvases:Array.isArray(canvasAssetData.canvases) ? canvasAssetData.canvases : [],
         items:Array.isArray(canvasAssetData.items) ? canvasAssetData.items : []
     };
+    historyImageData = Array.isArray(imgHistory) ? imgHistory : [];
+    historyVideoData = Array.isArray(vidHistory) ? vidHistory : [];
+    historyLoaded = true;
     // 刷新时默认回到「默认资产库」
     const libs = assetLibraries();
     activeAssetLibraryId = (libs.find(lib => lib.id === 'default') || libs[0])?.id || '';
@@ -743,10 +755,19 @@ async function loadAll(){
 }
 function render(){
     document.querySelectorAll('[data-tab]').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === activeTab));
+    // 历史记录Tab：整页自然滚动（瀑布流更合适）；其它Tab：保持原有三栏内部滚动布局
+    const isHistory = activeTab === 'history';
+    document.body.classList.toggle('history-scroll-mode', isHistory);
+    const assetPage = document.querySelector('.asset-page');
+    if(assetPage) assetPage.classList.toggle('history-scroll-mode', isHistory);
+    // 滚动回到顶部（切Tab时重置）
+    if(isHistory) window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' });
+
     if(activeTab === 'prompts') renderPromptManager();
     else if(activeTab === 'workflows') renderWorkflowManager();
     else if(activeTab === 'local') renderLocalManager();
     else if(activeTab === 'canvas-assets') renderCanvasAssetsManager();
+    else if(activeTab === 'history') renderHistoryManager();
     else renderAssetManager();
     refreshIcons();
 }
@@ -862,6 +883,14 @@ function renderCanvasAssetDetail(item){
     if(!item) return `<div class="panel-head"><div class="panel-title"><strong>画布资产详情</strong><span>选择一个画布资产查看详情</span></div></div><div class="detail-scroll"><div class="detail-empty"><i data-lucide="layout-dashboard"></i><span>暂无画布资产</span></div></div>`;
     const kind = assetKind(item);
     const canPreview = ['image','video'].includes(kind);
+    const prompt = item.prompt || '';
+    const refImages = item.reference_images || [];
+    const model = item.model || '';
+    const provider = item.provider || '';
+    const size = item.size || '';
+    const quality = item.quality || '';
+    const createTime = item.created_at ? new Date(Number(item.created_at) * 1000).toLocaleString('zh-CN', {hour12:false}) : '';
+    const hasGenParams = model || provider || size || quality;
     return `
         <div class="panel-head">
             <div class="panel-title"><strong>画布资产详情</strong><span>${escapeHtml(canvasAssetKindLabel(item))}</span></div>
@@ -880,6 +909,14 @@ function renderCanvasAssetDetail(item){
             </div>
             <div class="detail-body">
                 <div class="detail-name">${escapeHtml(item.name || '画布资产')}</div>
+                ${createTime ? `<div class="detail-create-time"><i data-lucide="calendar"></i><span>${escapeHtml(createTime)}</span></div>` : ''}
+                ${prompt ? `<div class="detail-section"><div class="detail-section-label">提示词</div><div class="detail-prompt-block"><pre>${escapeHtml(prompt)}</pre></div></div>` : ''}
+                ${hasGenParams ? `<div class="detail-section"><div class="detail-section-label">生成参数</div><div class="detail-params-block">${model ? `<div class="detail-param-row"><span class="detail-param-label">模型</span><span class="detail-param-value">${escapeHtml(model)}</span></div>` : ''}${provider ? `<div class="detail-param-row"><span class="detail-param-label">平台</span><span class="detail-param-value">${escapeHtml(provider)}</span></div>` : ''}${size ? `<div class="detail-param-row"><span class="detail-param-label">尺寸</span><span class="detail-param-value">${escapeHtml(size)}</span></div>` : ''}${quality ? `<div class="detail-param-row"><span class="detail-param-label">画质</span><span class="detail-param-value">${escapeHtml(quality)}</span></div>` : ''}</div></div>` : ''}
+                ${refImages.length ? `<div class="detail-section"><div class="detail-section-label">参考素材 (${refImages.length})</div><div class="detail-ref-grid">${refImages.map((r, i) => {
+                    const u = typeof r === 'string' ? r : (r.url || '');
+                    const role = typeof r === 'string' ? '' : (r.role || '');
+                    return u ? `<div class="detail-ref-thumb" title="${escapeAttr(role || '参考图 ' + (i+1))}"><img src="${escapeAttr(u)}" alt="" loading="lazy"></div>` : '';
+                }).join('')}</div></div>` : ''}
                 <div class="detail-meta-grid">
                     <div class="detail-meta"><span>类型</span><strong>${escapeHtml(canvasAssetKindLabel(item))}</strong></div>
                     <div class="detail-meta"><span>画布分类</span><strong>${escapeHtml(canvasKindLabel(item.canvas_kind))}</strong></div>
@@ -3466,4 +3503,390 @@ refreshBtn?.addEventListener('click', () => loadAll().catch(err => setStatus(err
 window.addEventListener('message', event => {
     if(event.data?.type === 'studio-theme') window.StudioTheme?.apply?.(event.data.theme);
 });
+
+/* ================= 历史记录 ================= */
+function historyMediaTypeLabel(item){
+    if(item?.videos?.length) return '视频';
+    if(item?.images?.length) return '图片';
+    return '生成';
+}
+function historyMediaPreviewUrl(item){
+    if(!item) return '';
+    if(item?.videos?.length) return item.videos[0];
+    if(item?.images?.length) return item.images[0];
+    return '';
+}
+function historyMediaCount(item){
+    if(!item) return 0;
+    if(item?.videos?.length) return item.videos.length;
+    if(item?.images?.length) return item.images.length;
+    return 0;
+}
+function historyIsVideo(item){
+    return !!(item?.videos?.length);
+}
+function filteredHistoryItems(){
+    const list = historyMediaTab === 'video' ? historyVideoData : historyImageData;
+    const q = historyQuery.trim().toLowerCase();
+    let result = q ? list.filter(item => {
+        const prompt = String(item?.prompt || '').toLowerCase();
+        const model = String(item?.model || '').toLowerCase();
+        const provider = String(item?.provider_name || item?.provider_id || '').toLowerCase();
+        return prompt.includes(q) || model.includes(q) || provider.includes(q);
+    }) : [...list];
+    // 去重：按 prompt + 首张图片URL 去重，保留第一条
+    const seen = new Set();
+    result = result.filter(item => {
+        const prompt = String(item?.prompt || '');
+        const firstImg = item?.images?.[0] || item?.videos?.[0] || '';
+        const key = prompt + '||' + firstImg;
+        if(seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+    // 按时间倒序排列（最新在前）
+    result.sort((a, b) => {
+        const ta = Number(a?.timestamp || 0);
+        const tb = Number(b?.timestamp || 0);
+        return tb - ta;
+    });
+    return result;
+}
+function renderHistoryCard(item, index){
+    if(!item) return '';
+    const isVideo = historyIsVideo(item);
+    const mediaUrl = historyMediaPreviewUrl(item);
+    const count = historyMediaCount(item);
+    const timestamp = Number(item?.timestamp || 0) * 1000;
+    const dateStr = timestamp ? new Date(timestamp).toLocaleString('zh-CN', {hour12:false}) : '未知时间';
+    // 图片：不固定比例，img width:100%;height:auto 保留真实比例；视频：加 video-thumb 类用 16:9
+    const thumbClass = 'history-thumb' + (isVideo ? ' video-thumb' : '');
+    const thumb = isVideo ? '' : `<img src="${escapeAttr(mediaUrl)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">`;
+    const videoOverlay = isVideo
+        ? `<div class="history-video-overlay"><video src="${escapeAttr(mediaUrl)}" preload="metadata" muted></video><i data-lucide="play" class="history-play-icon"></i></div>`
+        : '';
+    const badgeCount = count > 1 ? `<div class="history-count-badge">${count}</div>` : '';
+    const badgeVideo = isVideo ? `<div class="history-kind-badge kind-video"><i data-lucide="video"></i></div>` : `<div class="history-kind-badge kind-image"><i data-lucide="image"></i></div>`;
+    const promptPreview = String(item?.prompt || '（无提示词）').slice(0, 80);
+    return `
+        <div class="history-card" data-history-index="${index}" tabindex="0">
+            <div class="${thumbClass}">
+                ${videoOverlay}
+                ${thumb}
+                ${badgeCount}
+                ${badgeVideo}
+            </div>
+            <div class="history-meta">
+                <div class="history-prompt" title="${escapeAttr(String(item?.prompt || ''))}">${escapeHtml(promptPreview)}${String(item?.prompt || '').length > 80 ? '…' : ''}</div>
+                <div class="history-sub-row">
+                    <span class="history-sub-item"><i data-lucide="cpu"></i><span>${escapeHtml(item?.model || '—')}</span></span>
+                    <span class="history-sub-item"><i data-lucide="cloud"></i><span>${escapeHtml(item?.provider_name || item?.provider_id || '—')}</span></span>
+                </div>
+                <div class="history-time"><i data-lucide="calendar"></i><span>${escapeHtml(dateStr)}</span></div>
+            </div>
+        </div>
+    `;
+}
+function renderHistoryManager(){
+    const items = filteredHistoryItems();
+    const totalImg = historyImageData.length;
+    const totalVid = historyVideoData.length;
+    const activeMediaTab = historyMediaTab;
+    const total = items.length;
+    const footHint = (() => {
+        if (!total) return '';
+        if (activeMediaTab === 'video') {
+            return `<div class="history-foot-hint"><i data-lucide="chevrons-down"></i>已浏览全部 ${totalVid} 条视频生成记录 · 继续下翻加载更多内容<i data-lucide="chevrons-down"></i></div>`;
+        }
+        return `<div class="history-foot-hint"><i data-lucide="chevrons-down"></i>已浏览全部 ${totalImg} 条图片生成记录 · 继续下翻加载更多内容<i data-lucide="chevrons-down"></i></div>`;
+    })();
+    root.innerHTML = `
+        <section class="asset-panel asset-content history-root history-panel">
+            <div class="history-sticky-head">
+                <div class="history-head-row">
+                    <div class="content-heading history-heading-compact">
+                        <strong>生成历史记录</strong>
+                        <span>查看所有画布输出的图片与视频记录</span>
+                    </div>
+                    <div class="history-head-row-right">
+                        <div class="history-media-tabs">
+                            <button type="button" class="history-media-tab ${activeMediaTab==='image'?'active':''}" data-history-media="image">
+                                <i data-lucide="image"></i><span>图片生成记录</span><em class="tab-count">${totalImg}</em>
+                            </button>
+                            <button type="button" class="history-media-tab ${activeMediaTab==='video'?'active':''}" data-history-media="video">
+                                <i data-lucide="video"></i><span>视频生成记录</span><em class="tab-count">${totalVid}</em>
+                            </button>
+                        </div>
+                        <button class="asset-btn" id="historyRefreshBtn" type="button"><i data-lucide="refresh-cw"></i><span>刷新</span></button>
+                    </div>
+                </div>
+            </div>
+            ${items.length ? `
+                <div class="history-grid">
+                    ${items.map((item, idx) => renderHistoryCard(item, idx)).join('')}
+                </div>
+                ${footHint}
+            ` : `
+                <div class="empty-state">
+                    <i data-lucide="inbox"></i>
+                    <div>${activeMediaTab === 'video' ? '暂无视频生成记录' : '暂无图片生成记录'}</div>
+                    <span>在这里你可以查看所有画布输出的${activeMediaTab === 'video' ? '视频' : '图片'}及其提示词、参考图等详情。</span>
+                </div>
+            `}
+        </section>
+        ${historyDetailItem ? renderHistoryDetailModal(historyDetailItem) : ''}
+    `;
+}
+function renderHistoryDetailModal(item){
+    if(!item) return '';
+    const isVideo = historyIsVideo(item);
+    const mediaList = isVideo ? (item.videos || []) : (item.images || []);
+    const timestamp = Number(item?.timestamp || 0) * 1000;
+    const dateStr = timestamp ? new Date(timestamp).toLocaleString('zh-CN', {hour12:false}) : '未知时间';
+    const params = item?.params || {};
+    const refImages = params?.reference_images || [];
+    const refVideos = params?.reference_videos || [];
+    const refAudios = params?.reference_audios || [];
+    const paramRows = [];
+    if(item?.model) paramRows.push({label:'模型', value: item.model});
+    if(item?.provider_name || item?.provider_id) paramRows.push({label:'平台', value: item?.provider_name || item?.provider_id});
+    if(params?.duration) paramRows.push({label:'时长', value: `${params.duration} 秒`});
+    if(params?.aspect_ratio) paramRows.push({label:'比例', value: params.aspect_ratio});
+    if(params?.resolution) paramRows.push({label:'分辨率', value: params.resolution});
+    if(params?.size) paramRows.push({label:'尺寸', value: params.size});
+    if(params?.quality) paramRows.push({label:'画质', value: params.quality});
+    if(item?.task_id) paramRows.push({label:'任务ID', value: String(item.task_id)});
+    if(typeof params?.seed !== 'undefined' && params?.seed !== null && params.seed !== '') paramRows.push({label:'随机种子', value: String(params.seed)});
+    const boolFlags = [];
+    if(params?.enhance_prompt) boolFlags.push('增强提示词');
+    if(params?.enable_upsample) boolFlags.push('高清放大');
+    if(params?.watermark) boolFlags.push('水印');
+    if(params?.camerafixed) boolFlags.push('机位固定');
+    if(params?.return_last_frame) boolFlags.push('输出末帧');
+    if(params?.generate_audio) boolFlags.push('生成音频');
+    if(params?.multimodal) boolFlags.push('多模态');
+    if(boolFlags.length) paramRows.push({label:'附加选项', value: boolFlags.join('、')});
+
+    return `
+    <div class="history-detail-mask" id="historyDetailMask">
+        <div class="history-detail-panel" role="dialog" aria-modal="true">
+            <div class="detail-head">
+                <div>
+                    <div class="detail-title">${isVideo ? '视频生成详情' : '图片生成详情'}</div>
+                    <div class="detail-sub">${escapeHtml(dateStr)} · 共 ${mediaList.length} 个${isVideo ? '视频' : '图片'}</div>
+                </div>
+                <button class="asset-btn icon-only" id="historyDetailCloseBtn" type="button" title="关闭"><i data-lucide="x"></i></button>
+            </div>
+            <div class="detail-body">
+                <div class="detail-media-section">
+                    <div class="detail-section-title">生成结果</div>
+                    <div class="detail-media-grid">
+                        ${mediaList.map((url, i) => isVideo
+                            ? `<div class="detail-media-wrap detail-media-wrap-video"><video src="${escapeAttr(url)}" controls preload="metadata"></video><div class="detail-media-index">#${i+1}</div></div>`
+                            : `<div class="detail-media-wrap detail-media-wrap-image" data-history-image="${escapeAttr(url)}"><img src="${escapeAttr(url)}" alt="" loading="lazy" ondblclick="historyOpenLightbox(this.src)"><div class="detail-media-index">#${i+1}</div></div>`
+                        ).join('')}
+                    </div>
+                </div>
+                <div class="detail-info-section">
+                    <div class="detail-section-title">提示词</div>
+                    <div class="detail-prompt-box"><pre>${escapeHtml(item?.prompt || '（无）')}</pre></div>
+                    ${paramRows.length ? `
+                        <div class="detail-section-title">生成参数</div>
+                        <div class="detail-param-grid">
+                            ${paramRows.map(r => `
+                                <div class="detail-param-row">
+                                    <span class="detail-param-label">${escapeHtml(r.label)}</span>
+                                    <span class="detail-param-value">${escapeHtml(r.value)}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : ''}
+                    ${(refImages.length || refVideos.length || refAudios.length) ? `
+                        <div class="detail-section-title">参考素材</div>
+                        <div class="detail-refs">
+                            ${refImages.length ? `<div class="detail-ref-block">
+                                <div class="detail-ref-head"><i data-lucide="image"></i><span>参考图 (${refImages.length})</span></div>
+                                <div class="detail-ref-grid">
+                                    ${refImages.map((r, i) => {
+                                        const u = typeof r === 'string' ? r : (r?.url || '');
+                                        const role = typeof r === 'string' ? '' : (r?.role || '');
+                                        return `
+                                        <div class="detail-ref-item">
+                                            <img src="${escapeAttr(u)}" alt="" loading="lazy" ondblclick="historyOpenLightbox(this.src)">
+                                            ${role ? `<span class="detail-ref-role">${escapeHtml(role)}</span>` : `<span class="detail-ref-index">${i+1}</span>`}
+                                        </div>`;
+                                    }).join('')}
+                                </div>
+                            </div>` : ''}
+                            ${refVideos.length ? `<div class="detail-ref-block">
+                                <div class="detail-ref-head"><i data-lucide="video"></i><span>参考视频 (${refVideos.length})</span></div>
+                                <div class="detail-ref-grid">
+                                    ${refVideos.map((u, i) => `
+                                        <div class="detail-ref-item video-ref">
+                                            <video src="${escapeAttr(u)}" preload="metadata" muted></video>
+                                            <span class="detail-ref-index">${i+1}</span>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>` : ''}
+                            ${refAudios.length ? `<div class="detail-ref-block">
+                                <div class="detail-ref-head"><i data-lucide="music"></i><span>参考音频 (${refAudios.length})</span></div>
+                                <div class="detail-audio-list">
+                                    ${refAudios.map((u, i) => `
+                                        <div class="detail-audio-row">
+                                            <span class="detail-audio-index">${i+1}</span>
+                                            <audio src="${escapeAttr(u)}" controls preload="metadata"></audio>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>` : ''}
+                        </div>
+                    ` : ''}
+                </div>
+            </div>
+        </div>
+    </div>`;
+}
+
+async function refreshHistoryData(){
+    setStatus('刷新历史记录...');
+    try {
+        const [imgHistory, vidHistory] = await Promise.all([
+            apiJson('/api/history?media_type=image').catch(() => []),
+            apiJson('/api/history?media_type=video').catch(() => [])
+        ]);
+        historyImageData = Array.isArray(imgHistory) ? imgHistory : [];
+        historyVideoData = Array.isArray(vidHistory) ? vidHistory : [];
+        historyLoaded = true;
+        render();
+        setStatus('历史记录已刷新');
+    } catch(err){
+        setStatus(err.message || '刷新历史记录失败');
+    }
+}
+
+// 在 handleClick 里扩展历史记录点击
+const origHandleClick = document.onclick ? null : null;
+document.addEventListener('click', (event) => {
+    const target = event.target;
+    // 历史记录媒体类型子 tab
+    const mediaTab = target.closest?.('[data-history-media]');
+    if(mediaTab && activeTab === 'history'){
+        historyMediaTab = mediaTab.dataset.historyMedia === 'video' ? 'video' : 'image';
+        historyDetailItem = null;
+        render();
+        return;
+    }
+    // 历史记录刷新按钮
+    const refreshHistoryBtn = target.closest?.('#historyRefreshBtn');
+    if(refreshHistoryBtn){
+        refreshHistoryData();
+        return;
+    }
+    // 历史记录卡片 → 打开详情
+    const card = target.closest?.('[data-history-index]');
+    if(card && activeTab === 'history'){
+        const idx = Number(card.dataset.historyIndex || '-1');
+        const list = filteredHistoryItems();
+        if(idx >= 0 && list[idx]){
+            historyDetailItem = list[idx];
+            render();
+        }
+        return;
+    }
+    // 详情关闭
+    const closeBtn = target.closest?.('#historyDetailCloseBtn');
+    const mask = target.closest?.('#historyDetailMask');
+    if(closeBtn || (mask && target.id === 'historyDetailMask')){
+        historyDetailItem = null;
+        render();
+        return;
+    }
+});
+// 历史记录搜索输入
+document.addEventListener('input', (event) => {
+    const input = event.target;
+    if(input?.id === 'historySearchInput'){
+        historyQuery = input.value || '';
+        const grid = document.querySelector('.history-grid');
+        if(grid){
+            // 只重绘卡片网格，避免输入时失焦
+            const items = filteredHistoryItems();
+            grid.innerHTML = items.length
+                ? items.map((item, idx) => renderHistoryCard(item, idx)).join('')
+                : `<div class="empty-state" style="grid-column:1/-1"><i data-lucide="inbox"></i><div>没有匹配的记录</div><span>尝试换个关键词。</span></div>`;
+            refreshIcons();
+        }
+    }
+});
+// ESC 关闭详情
+document.addEventListener('keydown', (event) => {
+    if(event.key === 'Escape'){
+        // 优先关闭 lightbox
+        if(document.querySelector('.history-lightbox')){
+            historyCloseLightbox();
+            return;
+        }
+        if(historyDetailItem){
+            historyDetailItem = null;
+            render();
+        }
+    }
+});
+
+// 双击放大图片 - lightbox（支持滚轮缩放 + 拖拽平移）
+window.historyOpenLightbox = function(url){
+    if(!url) return;
+    const lb = document.createElement('div');
+    lb.className = 'history-lightbox';
+    lb.innerHTML = `<img src="${escapeAttr(url)}" alt="放大预览"><div class="lb-close-hint">滚轮缩放 · 拖拽平移 · 双击空白处或按 <kbd>Esc</kbd> 关闭</div>`;
+    const img = lb.querySelector('img');
+    let scale = 1, tx = 0, ty = 0, dragging = false, sx = 0, sy = 0;
+
+    function applyTransform(){
+        img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+    }
+
+    // 滚轮缩放
+    lb.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? -0.12 : 0.12;
+        scale = Math.max(0.2, Math.min(10, scale + delta));
+        applyTransform();
+    }, {passive: false});
+
+    // 拖拽平移
+    lb.addEventListener('mousedown', (e) => {
+        if(e.target !== img) return;
+        dragging = true;
+        sx = e.clientX - tx;
+        sy = e.clientY - ty;
+        lb.classList.add('dragging');
+    });
+    window.addEventListener('mousemove', (e) => {
+        if(!dragging) return;
+        tx = e.clientX - sx;
+        ty = e.clientY - sy;
+        applyTransform();
+    });
+    window.addEventListener('mouseup', () => {
+        dragging = false;
+        const lbEl = document.querySelector('.history-lightbox');
+        if(lbEl) lbEl.classList.remove('dragging');
+    });
+
+    // 点击空白处关闭
+    lb.addEventListener('click', (e) => {
+        if(e.target === lb){
+            historyCloseLightbox();
+        }
+    });
+
+    document.body.appendChild(lb);
+};
+window.historyCloseLightbox = function(){
+    const lb = document.querySelector('.history-lightbox');
+    if(lb) lb.remove();
+};
+
 document.addEventListener('DOMContentLoaded', () => loadAll().catch(err => setStatus(err.message || '加载失败')));

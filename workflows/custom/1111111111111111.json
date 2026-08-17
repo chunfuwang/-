@@ -1,0 +1,549 @@
+{
+  "555": {
+    "inputs": {
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "AnimateDiff",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "no_preview": false,
+      "images": [
+        "574",
+        0
+      ],
+      "audio": [
+        "560",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "合并为视频"
+    }
+  },
+  "557": {
+    "inputs": {
+      "noise": [
+        "559",
+        0
+      ],
+      "guider": [
+        "558",
+        0
+      ],
+      "sampler": [
+        "575",
+        0
+      ],
+      "sigmas": [
+        "576",
+        0
+      ],
+      "latent_image": [
+        "563",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器(高级)"
+    }
+  },
+  "558": {
+    "inputs": {
+      "model": [
+        "968",
+        0
+      ],
+      "conditioning": [
+        "563",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "基础引导"
+    }
+  },
+  "559": {
+    "inputs": {
+      "noise_seed": 718657098028516
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "随机噪波"
+    }
+  },
+  "560": {
+    "inputs": {
+      "samples": [
+        "557",
+        0
+      ],
+      "vae": [
+        "580",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "VAE解码_Audio"
+    }
+  },
+  "563": {
+    "inputs": {
+      "prompt": [
+        "589",
+        0
+      ],
+      "width": [
+        "572",
+        0
+      ],
+      "height": [
+        "572",
+        1
+      ],
+      "length": [
+        "570",
+        1
+      ],
+      "ref_image_size": "match",
+      "clip": [
+        "578",
+        0
+      ],
+      "vae": [
+        "579",
+        0
+      ],
+      "audio_vae": [
+        "580",
+        0
+      ],
+      "ref_images.ref_image_0": [
+        "585",
+        0
+      ],
+      "ref_images.ref_image_1": [
+        "587",
+        0
+      ],
+      "ref_images.ref_image_2": [
+        "573",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "_meta": {
+      "title": "MiniMax H3 Reference to Video"
+    }
+  },
+  "570": {
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "571",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "Math Expression"
+    }
+  },
+  "571": {
+    "inputs": {
+      "value": 15
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Float (Duration)"
+    }
+  },
+  "572": {
+    "inputs": {
+      "aspect_ratio": "16:9 (Widescreen)",
+      "megapixels": 0.6000000000000001,
+      "multiple": 32
+    },
+    "class_type": "ResolutionSelector",
+    "_meta": {
+      "title": "Resolution Selector (Size)"
+    }
+  },
+  "573": {
+    "inputs": {
+      "image": "pasted/751596ca8d27888f022b71f01f925ce0296f492f004265b7c9e0efb63d1db247.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "574": {
+    "inputs": {
+      "samples": [
+        "557",
+        0
+      ],
+      "vae": [
+        "579",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "575": {
+    "inputs": {
+      "sampler_name": "res_multistep"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "K采样器选择"
+    }
+  },
+  "576": {
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 12,
+      "denoise": 1,
+      "model": [
+        "968",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "基础调度器"
+    }
+  },
+  "577": {
+    "inputs": {
+      "unet_name": "MiniMax-H3-Ref2VA-int8-convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNET加载器"
+    }
+  },
+  "578": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "CLIP加载器"
+    }
+  },
+  "579": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "VAE加载器"
+    }
+  },
+  "580": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "VAE加载器"
+    }
+  },
+  "585": {
+    "inputs": {
+      "image": "pasted/5ab0e03370dc6347dbfdcfff94205e7a822b80bfacc4b36c837a92b9a830efb8.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "587": {
+    "inputs": {
+      "image": "pasted/da7b0e5e3e0a998f9a62735d94ca54e13756397e35ff598156e071e11317745b.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "589": {
+    "inputs": {
+      "string1": [
+        "829",
+        0
+      ],
+      "string2": "",
+      "string3": "",
+      "string4": "严格遵守提示词，不要有莫名其妙的元素",
+      "string5": "",
+      "separator": ""
+    },
+    "class_type": "StringMergeNode",
+    "_meta": {
+      "title": "字符串合并"
+    }
+  },
+  "829": {
+    "inputs": {
+      "value": "生成一段15秒、16:9、2K、原生立体声的超写实末日科幻机甲战斗短片。白金机械战士（@图片1）保持流线型白色复合装甲、黑色机械关节、蓝色胸口三角能源核心、双掌圆形脉冲炮与背部放射状翼刃结构；苍白异形猎兽（@图片2）保持低伏四足姿态、湿润半透明皮肤、外露血管、巨大裂口、交错尖牙、前肢骨刃与长尾结构；双方位于环形天体崩毁后的末日废墟世界（@图片3），暗红天空下悬浮岩石缓慢升空，断裂高塔、深坑、金属残骸与倾斜巨型环带形成宏大纵深。战斗从废墟平台左侧向右侧推进，最后在中央裂谷边缘完成终结。\n\n0—0.5秒：低机位宽镜头掠过末日废墟世界（@图片3），苍白异形猎兽（@图片2）从碎石烟尘中四肢爆发蹬地，身体贴地扑向白金机械战士（@图片1）；机械战士胸口能源核心瞬间点亮，背部翼刃向两侧展开，双脚下沉进入迎击姿态。\n\n0.5—2.3秒：异形猎兽（@图片2）右侧骨刃斜劈机械战士头部，机械战士（@图片1）向左滑步让开刃尖，以左前臂装甲撞开怪物手腕，借碰撞余势旋转上身，右掌脉冲炮贴近怪物胸腔释放短促蓝色冲击波；怪物上半身被震退，后爪抓裂地面稳住身体，长尾同时从低位横扫机械战士双腿。\n\n2.3—4.1秒：机械战士（@图片1）双腿收起跃过尾部，左侧翼刃刺入倾斜石柱作为支点，身体沿翼刃轴心高速荡向异形猎兽（@图片2）上方；镜头跟随形成半圆轨迹，机械战士在空中转髋，以右脚后跟重击怪物颈部，接触帧使用0.2秒轻微慢动作，怪物头部被压向地面，碎石呈扇形飞散。\n\n4.1—6.2秒：异形猎兽（@图片2）顺势翻身张开巨口咬住机械战士（@图片1）左侧翼刃，并用前肢骨刃夹击其腰部；机械战士主动解锁被咬住的翼刃，让脱离的金属刃片留在怪物口中，同时收腹避开骨刃，右肘向下撞击怪物眼侧，左膝紧接着上顶下颌，将怪物巨口与翼刃一同掀向空中。\n\n6.2—8.4秒：怪物（@图片2）利用后肢力量猛撞机械战士（@图片1）胸口，双方撞穿半塌金属墙；机械战士背部着地后连续翻滚卸力，怪物越过墙洞再次扑下，双侧骨刃交叉压向机械战士肩部。机械战士双臂交叉承受冲击，装甲接触处迸发蓝白火花，胸口核心由蓝色迅速增亮至白蓝色。\n\n8.4—10.7秒：机械战士（@图片1）释放环形能源脉冲，将异形猎兽（@图片2）的前肢向外弹开；机械战士借反冲从怪物腹部下方滑出，右手抓住其后腿，身体贴地旋转至怪物背后，剩余六枚翼刃沿肩背轨道依次射出，分别钉入怪物两侧前肢关节、后肢外侧与长尾根部，将其四肢展开固定在断裂平台上。\n\n10.7—13.0秒：异形猎兽（@图片2）强行扯动翼刃，平台裂缝迅速向中央扩散；机械战士（@图片1）踏上怪物脊背向前疾跑，怪物甩头回咬，机械战士向侧面旋身避开尖牙，左手扣住怪物下颌，右掌脉冲炮压入张开的巨口，胸口核心、手臂导光槽与掌心炮形成同一条蓝色能源通路。\n\n13.0—15.0秒：机械战士（@图片1）释放集中脉冲，蓝白能量从异形猎兽（@图片2）口腔贯穿头部装甲状骨壳，冲击力将怪物连同固定翼刃推入中央裂谷；机械战士松手后向后翻跃落在崩塌边缘，召回六枚翼刃并重新组成对称背翼。最后0.8秒，怪物坠入红光深处，机械战士半跪卸力后缓慢抬头，胸口核心恢复稳定蓝光，天空中的巨型环带在其背后持续崩解。\n\n剪辑与动作：整场战斗保持清晰的左向右推进轴线，每次切镜落在骨刃接触、脉冲命中、墙体破裂、人物落地、翼刃钉入和怪物坠落的动作节点。上一动作的受力直接启动下一动作：格挡产生旋转、尾扫触发跳跃、翼刃固定转化为空中摆荡、被咬住的翼刃转化为主动脱离、撞墙余势转化为翻滚卸力、交叉压制转化为能源反冲。高速段保持机械战士、怪物攻击部位与碰撞结果同时清晰，镜头以低位侧向跟拍、半圆环绕、贴地追踪和短暂俯视交替呈现，慢动作总时长0.4秒，仅强化脚踢颈部与最终掌炮释放的真实接触帧。\n\n视觉风格：电影级超写实硬科幻战斗质感，白金装甲表面具有细密划痕、陶瓷涂层、金属边缘和机械关节层次，蓝色能源光沿胸口、掌心与翼刃内部稳定流动；异形皮肤呈现湿润半透明组织、紫红血管、坚硬骨壳与肌肉拉伸细节。末日废墟采用暗红天空、深灰残骸、低饱和金属与强烈蓝色能源形成冷暖对撞，环形天体投下倾斜巨影，远处裂隙红光形成轮廓逆光，碎石、粉尘、火花和悬浮岩块跟随每次真实受力运动。\n\n声音设计：原生立体声呈现左右移动的碎石滚落、远处环形天体低频轰鸣、废墟风声与悬浮岩块摩擦声；机械战士动作伴随伺服电机、装甲滑轨、翼刃锁定、能源充电与掌炮脉冲声，异形猎兽伴随湿重脚步、骨刃破风、低沉嘶吼、牙齿碰撞与喉部震动。每次接触使用清晰的金属撞击、骨壳断裂和空气冲击层次，8.4秒能源脉冲加入环形低频扩散，13秒最终掌炮先短暂抽空环境声，再以集中爆发、怪物坠落回声和翼刃回收声完成高潮，最后只保留废墟风声、胸口核心稳定运转声与远处环带持续崩毁的低沉轰鸣。"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Input Text (Prompt)"
+    }
+  },
+  "967": {
+    "inputs": {
+      "model": [
+        "577",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
+    "_meta": {
+      "title": "MiniMax H3 Memory Efficient Sage Attention Patch"
+    }
+  },
+  "968": {
+    "inputs": {
+      "lora_name": "minimax-h3-turbo-v4-step600-ema.safetensors",
+      "strength": 1,
+      "low_vram": false,
+      "model": [
+        "967",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3TurboLoRA",
+    "_meta": {
+      "title": "MiniMax-H3 Turbo LoRA"
+    }
+  },
+  "556:0": {
+    "inputs": {
+      "mode": "always",
+      "volume": 1,
+      "file": "notify.mp3",
+      "any": [
+        "555",
+        0
+      ]
+    },
+    "class_type": "Notif-PlaySound",
+    "_meta": {
+      "title": "Play Sound"
+    }
+  },
+  "556:1": {
+    "inputs": {
+      "mode": "always",
+      "volume": 1,
+      "file": "notify.mp3",
+      "any": [
+        "555",
+        0
+      ]
+    },
+    "class_type": "Notif-PlaySound",
+    "_meta": {
+      "title": "Play Sound"
+    }
+  },
+  "556:2": {
+    "inputs": {
+      "mode": "always",
+      "volume": 1,
+      "file": "notify.mp3",
+      "any": [
+        "555",
+        0
+      ]
+    },
+    "class_type": "Notif-PlaySound",
+    "_meta": {
+      "title": "Play Sound"
+    }
+  },
+  "556:3": {
+    "inputs": {
+      "mode": "always",
+      "volume": 1,
+      "file": "notify.mp3",
+      "any": [
+        "555",
+        0
+      ]
+    },
+    "class_type": "Notif-PlaySound",
+    "_meta": {
+      "title": "Play Sound"
+    }
+  },
+  "556:4": {
+    "inputs": {
+      "mode": "always",
+      "volume": 1,
+      "file": "notify.mp3",
+      "any": [
+        "555",
+        0
+      ]
+    },
+    "class_type": "Notif-PlaySound",
+    "_meta": {
+      "title": "Play Sound"
+    }
+  },
+  "556:5": {
+    "inputs": {
+      "mode": "always",
+      "volume": 1,
+      "file": "notify.mp3",
+      "any": [
+        "555",
+        0
+      ]
+    },
+    "class_type": "Notif-PlaySound",
+    "_meta": {
+      "title": "Play Sound"
+    }
+  },
+  "556:6": {
+    "inputs": {
+      "mode": "always",
+      "volume": 1,
+      "file": "notify.mp3",
+      "any": [
+        "555",
+        0
+      ]
+    },
+    "class_type": "Notif-PlaySound",
+    "_meta": {
+      "title": "Play Sound"
+    }
+  },
+  "556:7": {
+    "inputs": {
+      "mode": "always",
+      "volume": 1,
+      "file": "notify.mp3",
+      "any": [
+        "555",
+        0
+      ]
+    },
+    "class_type": "Notif-PlaySound",
+    "_meta": {
+      "title": "Play Sound"
+    }
+  },
+  "556:8": {
+    "inputs": {
+      "mode": "always",
+      "volume": 1,
+      "file": "notify.mp3",
+      "any": [
+        "555",
+        0
+      ]
+    },
+    "class_type": "Notif-PlaySound",
+    "_meta": {
+      "title": "Play Sound"
+    }
+  },
+  "556:9": {
+    "inputs": {
+      "mode": "always",
+      "volume": 1,
+      "file": "notify.mp3",
+      "any": [
+        "555",
+        0
+      ]
+    },
+    "class_type": "Notif-PlaySound",
+    "_meta": {
+      "title": "Play Sound"
+    }
+  },
+  "556:10": {
+    "inputs": {
+      "purge_cache": true,
+      "purge_models": false,
+      "anything": [
+        "555",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: PurgeVRAM V2",
+    "_meta": {
+      "title": "LayerUtility: Purge VRAM V2"
+    }
+  },
+  "556:11": {
+    "inputs": {
+      "rife_name": "rife47.pth",
+      "clear_cache_after_n_frames": 10,
+      "multiplier": 2,
+      "fast_mode": true,
+      "ensemble": true,
+      "scale_factor": 1,
+      "frames": [
+        "556:10",
+        0
+      ]
+    },
+    "class_type": "RIFE VFI",
+    "_meta": {
+      "title": "RIFE VFI"
+    }
+  },
+  "556:12": {
+    "inputs": {
+      "purge_cache": true,
+      "purge_models": false,
+      "anything": [
+        "556:11",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: PurgeVRAM V2",
+    "_meta": {
+      "title": "LayerUtility: Purge VRAM V2"
+    }
+  },
+  "556:13": {
+    "inputs": {
+      "output_name": "output_audio",
+      "filename_prefix": "audio/ComfyUI",
+      "audio": [
+        "556:12",
+        0
+      ]
+    },
+    "class_type": "ShellAgentPluginSaveAudios",
+    "_meta": {
+      "title": "Save Audios (ShellAgent Plugin)"
+    }
+  }
+}

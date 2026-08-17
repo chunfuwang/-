@@ -124,6 +124,8 @@ const dropOverlay = document.getElementById('dropOverlay');
 const createMenu = document.getElementById('createMenu');
 const addNodeMenuToggle = document.getElementById('addNodeMenuToggle');
 const addNodePalette = document.getElementById('addNodePalette');
+const createNodeDrawer = document.getElementById('createNodeDrawer');
+const createNodeMenuToggle = document.getElementById('createNodeMenuToggle');
 const linkCreateMenu = document.getElementById('linkCreateMenu');
 const nodeInputMenu = document.getElementById('nodeInputMenu');
 const nodeOutputMenu = document.getElementById('nodeOutputMenu');
@@ -215,6 +217,8 @@ let minimapDrag = false;
 let minimapState = null;
 let minimapRenderQueued = false;
 let resizeNode = null;
+let resizeFrameId = 0;
+let resizePendingPointer = null;
 let llmPaneDrag = null;
 let tempLink = null;
 let knifeActive = false;
@@ -556,7 +560,7 @@ function providerVideoModels(providerId){
     return models.length ? uniqueModels(models) : uniqueModels(DEFAULT_VIDEO_MODELS);
 }
 function sanitizeVideoNodeProviderModel(node){
-    if(!node || node.type !== 'video') return;
+    if(!node || !['video','videoTool'].includes(node.type)) return;
     node.apiProvider = resolveVideoProviderId(node.apiProvider || 'comfly');
     const models = providerVideoModels(node.apiProvider);
     if(!models.length) node.model = '';
@@ -758,8 +762,12 @@ function apiImageSize(ratioValue, resolutionValue, customRatioValue = '', custom
         const longSide = RES_LONG_SIDE[resolutionKey] || 1024;
         if(parsed){
             const pixelLimit = RES_PIXEL_LIMIT[resolutionKey] || (longSide * longSide);
-            const rawWidth = parsed >= 1 ? longSide : Math.min(longSide * parsed, Math.sqrt(pixelLimit * parsed));
-            const rawHeight = parsed >= 1 ? Math.min(longSide / parsed, Math.sqrt(pixelLimit / parsed)) : longSide;
+            // 同时受“最长边”和“总像素”限制，并始终用同一缩放系数计算宽高。
+            // 旧逻辑会单独截断短边，导致 1:1 / 1K 被提交为 1536x1248。
+            const rawWidth = parsed >= 1
+                ? Math.min(longSide, Math.sqrt(pixelLimit * parsed))
+                : Math.min(longSide * parsed, Math.sqrt(pixelLimit * parsed));
+            const rawHeight = rawWidth / parsed;
             const width = Math.floor(rawWidth / 16) * 16;
             const height = Math.floor(rawHeight / 16) * 16;
             return `${Math.max(64, width)}x${Math.max(64, height)}`;
@@ -1001,6 +1009,34 @@ function centerViewportOnWorldPoint(point){
     renderLinks();
     renderSelectionHub();
 }
+function fitViewToNodes(){
+    if(!nodes || nodes.length === 0) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for(const n of nodes){
+        const r = estimatedNodeRect(n);
+        minX = Math.min(minX, r.x);
+        minY = Math.min(minY, r.y);
+        maxX = Math.max(maxX, r.x + r.w);
+        maxY = Math.max(maxY, r.y + r.h);
+    }
+    if(!isFinite(minX)) return;
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const rect = board.getBoundingClientRect();
+    const bw = Math.max(1, maxX - minX);
+    const bh = Math.max(1, maxY - minY);
+    const pad = 80;
+    const scaleX = (rect.width - pad * 2) / bw;
+    const scaleY = (rect.height - pad * 2) / bh;
+    let targetScale = Math.min(scaleX, scaleY);
+    targetScale = Math.max(0.2, Math.min(1.5, targetScale));
+    viewport.scale = targetScale;
+    viewport.x = rect.width / 2 - cx * viewport.scale;
+    viewport.y = rect.height / 2 - cy * viewport.scale;
+    applyViewport();
+    renderLinks();
+    renderSelectionHub();
+}
 function refreshGeometry(){
     renderLinks();
     renderSelectionHub();
@@ -1052,6 +1088,9 @@ function refreshOutputTimer(){
 function serializableCanvasNode(node){
     const copy = {...(node || {})};
     delete copy._ltxEditor;
+    delete copy._suppressImageToolClick;
+    delete copy._suppressImageToolClickUntil;
+    delete copy._suppressVideoToolClickUntil;
     delete copy.running;
     delete copy.runStatus;
     delete copy.runError;
@@ -1692,6 +1731,9 @@ async function openCanvas(id){
         setCanvasMode(true);
         renderCanvasList();
         render();
+        fitViewToNodes();
+        canvas.viewport = {...viewport};
+        scheduleSave();
         resumeCanvasImageTasks();
         startCanvasRemotePolling();
         setStatus('Ready');
@@ -1753,8 +1795,10 @@ function canvasLocalAssetUrls(){
     };
     nodes.forEach(node => {
         if(node.url) add(node.url);
+        if(node.imageUrl) add(node.imageUrl);
         (node.images || []).forEach(add);
         (node.generatedOutputs || []).forEach(add);
+        (node.references || []).forEach(add);
         Object.entries(node.imageComparisons || {}).forEach(([key, value]) => {
             add(key);
             add(value);
@@ -2061,6 +2105,864 @@ function addImageNode(point){
 function addPromptNode(point){
     const p = point || defaultPoint(0, 0);
     return addNode({id:uid('prompt'), type:'prompt', x:p.x, y:p.y, text:''});
+}
+function addTextNode(point){
+    const p = point || defaultPoint(0, 0);
+    const node = addNode({
+        id:uid('text'),
+        type:'text',
+        x:p.x,
+        y:p.y,
+        w:430,
+        h:320,
+        name:'新建文本文档.txt',
+        text:''
+    });
+    if(node){
+        requestAnimationFrame(() => {
+            const editor = nodesEl.querySelector(`.text-node[data-id="${CSS.escape(node.id)}"] .txt-editor-area`);
+            editor?.focus();
+        });
+    }
+    return node;
+}
+function addImageToolNode(point){
+    const p = point || defaultPoint(0, 0);
+    const node = addNode({
+        id:uid('imgtool'),
+        type:'imageTool',
+        x:p.x,
+        y:p.y,
+        w:300,
+        h:332,
+        prompt:'',
+        panelOpen:false,
+        model:'G Image 2',
+        ratio:'1:1',
+        resolution:'1k',
+        quality:'中',
+        count:1,
+        apiProvider:'',
+        apiModel:'',
+        imageUrl:'',
+        imageAspect:1,
+        imageFrameLongEdge:300,
+        references:[],
+        generatedOutputs:[],
+        outputHistory:[]
+    });
+    return node;
+}
+function imageToolFrameSize(node){
+    const aspect = Math.max(.12, Math.min(8, Number(node?.imageAspect || 1) || 1));
+    const savedEdge = Number(node?.imageFrameLongEdge || Math.max(Number(node?.frameW || 0), Number(node?.frameH || 0)) || 300);
+    const edge = Math.max(120, Math.min(1200, savedEdge));
+    return aspect >= 1
+        ? {w:edge, h:Math.max(80, Math.round(edge / aspect))}
+        : {w:Math.max(80, Math.round(edge * aspect)), h:edge};
+}
+function syncImageToolNodeSize(node, panelOpen=node?.panelOpen){
+    if(!node || node.type !== 'imageTool') return;
+    const frame = imageToolFrameSize(node);
+    node.frameW = frame.w;
+    node.frameH = frame.h;
+    node.panelOpen = Boolean(panelOpen);
+    // 展开的编辑区是悬浮层，不改变图片节点本身尺寸和坐标。
+    node.w = frame.w;
+    node.h = 32 + frame.h;
+}
+function setImageToolImage(node, url, name='image'){
+    if(!node || !url) return;
+    node.imageUrl = url;
+    node.imageName = name || 'image';
+    const probe = new Image();
+    probe.onload = () => {
+        if(probe.naturalWidth && probe.naturalHeight){
+            node.imageAspect = probe.naturalWidth / probe.naturalHeight;
+            node.imageWidth = probe.naturalWidth;
+            node.imageHeight = probe.naturalHeight;
+        }
+        syncImageToolNodeSize(node);
+        refreshNodes([node.id]);
+        scheduleSave();
+    };
+    probe.src = url;
+    // 图片工具既是编辑节点也是标准图片输出节点。上传或替换当前图片后，
+    // 立即把新图片同步给已经连接的 Output 和下游生成节点。
+    syncConnectedOutputsFromGenerated(node, [url]);
+    refreshGeneratorInputViews();
+    const imageToolTargets = connections
+        .filter(connection => connection.from === node.id)
+        .map(connection => nodes.find(item => item.id === connection.to))
+        .filter(item => ['imageTool','videoTool'].includes(item?.type))
+        .map(item => item.id);
+    if(imageToolTargets.length) refreshNodes(imageToolTargets);
+    syncImageToolNodeSize(node);
+    refreshNodes([node.id]);
+    scheduleSave();
+}
+async function uploadImageToolFile(node, file, asReference=false){
+    if(!node || !file || mediaKindForUpload(file) !== 'image') return;
+    const form = new FormData();
+    form.append('files', file);
+    const data = await fetch('/api/ai/upload', {method:'POST', body:form}).then(async response => {
+        if(!response.ok) throw new Error(await responseErrorMessage(response, '图片上传失败'));
+        return response.json();
+    });
+    const uploaded = data.files?.[0];
+    if(!uploaded?.url) throw new Error('图片上传失败');
+    if(asReference){
+        node.references = Array.isArray(node.references) ? node.references : [];
+        if(!node.references.some(item => item.url === uploaded.url)) node.references.push({url:uploaded.url, name:uploaded.name || file.name});
+        refreshNodes([node.id]);
+        scheduleSave();
+    } else {
+        setImageToolImage(node, uploaded.url, uploaded.name || file.name);
+    }
+}
+function pickImageToolUpload(node, asReference=false){
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = async () => {
+        const file = input.files?.[0];
+        if(!file) return;
+        try { await uploadImageToolFile(node, file, asReference); }
+        catch(error){ showErrorModal(error.message || '图片上传失败', '图片上传失败'); }
+    };
+    input.click();
+}
+function imageToolOptionChoices(field){
+    if(field === 'model') return ['G Image 2', '香蕉2', '香蕉Pro', 'Seedream 5.0 Pro', 'Seedream 4.5', 'Kling O1', 'Kling O3'];
+    if(field === 'ratio') return ['1:1', '16:9', '9:16', '3:4', '4:3', '3:2', '2:3', '5:4', '4:5', '21:9', '2:1', '1:2', '3:1', '1:3'];
+    if(field === 'resolution') return ['1k', '2k', '4k'];
+    if(field === 'quality') return ['低', '中', '高'];
+    if(field === 'count') return [1, 2, 3, 4];
+    return [];
+}
+let imageToolOptionCloseTimer = null;
+function cancelImageToolOptionMenuClose(){
+    clearTimeout(imageToolOptionCloseTimer);
+    imageToolOptionCloseTimer = null;
+}
+function scheduleImageToolOptionMenuClose(delay=180){
+    cancelImageToolOptionMenuClose();
+    imageToolOptionCloseTimer = setTimeout(closeImageToolOptionMenu, delay);
+}
+function openImageToolOptionMenu(node, field, anchor){
+    if(!anchor) return;
+    closeImageToolOptionMenu();
+    const menu = document.createElement('div');
+    menu.className = `image-tool-option-menu image-tool-${field}-menu`;
+    if(field === 'provider'){
+        const providers = imageApiProviders();
+        const selectedId = imageToolApiTarget(node).providerId;
+        menu.innerHTML = `<strong>API 平台</strong>${providers.length ? providers.map(provider => `<button type="button" class="image-tool-model-choice ${provider.id === selectedId ? 'active' : ''}" data-field="provider" data-value="${escapeAttr(provider.id)}"><span><i data-lucide="globe-2"></i>${escapeHtml(provider.name || provider.id)}</span><small>${providerImageModels(provider.id).length} 个图片模型</small>${provider.id === selectedId ? '<i data-lucide="check" class="choice-check"></i>' : ''}</button>`).join('') : '<button type="button" disabled>请先在 API 设置中添加图片 API</button>'}`;
+    } else if(field === 'model'){
+        const target = imageToolApiTarget(node);
+        const models = providerImageModels(target.providerId);
+        const selectedModel = target.model;
+        const resolutionLabel = model => String(model || '').match(/-(2k|4k)$/i)?.[1]?.toUpperCase() || '1K';
+        menu.innerHTML = `<strong>图片模型 · ${escapeHtml(providerById(target.providerId)?.name || target.providerId || 'API')}</strong>${models.length ? models.map(model => `<button type="button" class="image-tool-model-choice ${model === selectedModel ? 'active' : ''}" data-field="model" data-value="${escapeAttr(model)}"><span><i data-lucide="aperture"></i>${escapeHtml(model)}</span><small>${resolutionLabel(model)}</small>${model === selectedModel ? '<i data-lucide="check" class="choice-check"></i>' : ''}</button>`).join('') : '<button type="button" disabled>该 API 暂无图片模型</button>'}`;
+    } else if(field === 'settings'){
+        menu.innerHTML = `
+            <strong>比例</strong>
+            <div class="image-tool-ratio-grid">${imageToolOptionChoices('ratio').map(choice => `<button type="button" class="${node.ratio === choice ? 'active' : ''}" data-field="ratio" data-value="${escapeAttr(choice)}"><i data-ratio-icon="${escapeAttr(choice)}"></i><span>${escapeHtml(choice)}</span></button>`).join('')}</div>
+            <strong>清晰度</strong>
+            <div class="image-tool-segment">${imageToolOptionChoices('resolution').map(choice => `<button type="button" class="${node.resolution === choice ? 'active' : ''}" data-field="resolution" data-value="${escapeAttr(choice)}">${escapeHtml(choice)}</button>`).join('')}</div>
+            <strong>画质</strong>
+            <div class="image-tool-quality">${imageToolOptionChoices('quality').map(choice => `<button type="button" class="${node.quality === choice ? 'active' : ''}" data-field="quality" data-value="${escapeAttr(choice)}">${escapeHtml(choice)}</button>`).join('')}</div>`;
+    } else if(field === 'count'){
+        menu.innerHTML = `<strong>生成数量</strong>${imageToolOptionChoices('count').map(choice => `<button type="button" class="image-tool-count-choice ${Number(node.count || 1) === choice ? 'active' : ''}" data-field="count" data-value="${choice}">× ${choice}</button>`).join('')}`;
+    } else return;
+    document.body.appendChild(menu);
+    const rect = anchor.getBoundingClientRect();
+    const left = Math.max(12, Math.min(window.innerWidth - menu.offsetWidth - 12, rect.left));
+    const top = Math.max(12, rect.top - menu.offsetHeight - 10);
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+    menu._imageToolAnchor = anchor;
+    anchor.onpointerenter = cancelImageToolOptionMenuClose;
+    anchor.onpointerleave = () => scheduleImageToolOptionMenuClose();
+    menu.onpointerenter = cancelImageToolOptionMenuClose;
+    menu.onpointerleave = () => scheduleImageToolOptionMenuClose();
+    menu.querySelectorAll('[data-field]').forEach(btn => {
+        btn.onclick = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const value = btn.dataset.value || '';
+            const targetField = btn.dataset.field;
+            if(targetField === 'count') node.count = Number(value) || 1;
+            else if(targetField === 'provider'){
+                node.apiProvider = value;
+                const models = providerImageModels(value);
+                const selected = models.find(model => model === node.apiModel || model === node.model) || models[0] || '';
+                node.apiModel = selected;
+                node.model = selected;
+            } else if(targetField === 'model'){
+                node.model = value;
+                node.apiModel = value;
+            } else {
+                node[targetField] = value;
+                if(targetField === 'resolution') syncImageToolModelForResolution(node);
+            }
+            scheduleSave();
+            refreshNodes([node.id]);
+            if(targetField === 'ratio' || targetField === 'resolution' || targetField === 'quality'){
+                requestAnimationFrame(() => {
+                    const nextAnchor = nodesEl.querySelector(`.image-tool-node[data-id="${CSS.escape(node.id)}"] [data-image-tool-option="settings"]`);
+                    if(nextAnchor) openImageToolOptionMenu(node, 'settings', nextAnchor);
+                });
+            } else closeImageToolOptionMenu();
+        };
+    });
+    refreshIcons();
+}
+function closeImageToolOptionMenu(){
+    cancelImageToolOptionMenuClose();
+    const menu = document.querySelector('.image-tool-option-menu');
+    if(menu?._imageToolAnchor){
+        menu._imageToolAnchor.onpointerenter = null;
+        menu._imageToolAnchor.onpointerleave = null;
+    }
+    menu?.remove();
+}
+function imageToolAssetItems(){
+    const seen = new Set();
+    return canvasAssetSourceLibraries().flatMap(library => library.categories || []).flatMap(category => category.items || []).filter(item => {
+        if(!item?.url || canvasAssetItemKind(item) !== 'image' || seen.has(item.url)) return false;
+        seen.add(item.url);
+        return true;
+    });
+}
+function closeImageToolReferencePicker(){
+    document.querySelector('.image-tool-resource-backdrop')?.remove();
+}
+async function openImageToolReferencePicker(node){
+    closeImageToolReferencePicker();
+    try { await loadCanvasAssetLibrary({renderPanel:false}); } catch(error) { console.warn(error); }
+    const items = imageToolAssetItems();
+    const modal = document.createElement('div');
+    modal.className = 'image-tool-resource-backdrop';
+    modal.innerHTML = `
+        <div class="image-tool-resource-dialog">
+            <header><strong>选择资源</strong><button type="button" data-resource-close><i data-lucide="x"></i></button></header>
+            <div class="image-tool-resource-tabs"><button type="button" class="active">画布上的资源 (${items.length})</button><label>本地上传<input type="file" accept="image/*" multiple></label></div>
+            <label class="image-tool-resource-search"><i data-lucide="search"></i><input type="search" placeholder="搜索资源..."></label>
+            <div class="image-tool-resource-grid">${items.length ? items.map((item, index) => `<button type="button" data-resource-index="${index}" title="${escapeAttr(item.name || 'image')}"><img src="${escapeAttr(item.url)}" alt=""><span>${escapeHtml(item.name || 'image')}</span></button>`).join('') : '<p>资产库中暂无图片，可从“本地上传”添加。</p>'}</div>
+            <footer><button type="button" data-resource-cancel>取消</button><button type="button" class="primary" data-resource-use disabled>使用 0 项</button></footer>
+        </div>`;
+    document.body.appendChild(modal);
+    const chosen = new Set();
+    const useButton = modal.querySelector('[data-resource-use]');
+    const updateUse = () => { useButton.disabled = !chosen.size; useButton.textContent = `使用 ${chosen.size} 项`; };
+    modal.querySelectorAll('[data-resource-index]').forEach(button => button.onclick = event => {
+        event.stopPropagation();
+        const index = Number(button.dataset.resourceIndex);
+        chosen.has(index) ? chosen.delete(index) : chosen.add(index);
+        button.classList.toggle('selected', chosen.has(index));
+        updateUse();
+    });
+    modal.querySelector('input[type="search"]').oninput = event => {
+        const query = event.target.value.trim().toLowerCase();
+        modal.querySelectorAll('[data-resource-index]').forEach(button => {
+            const item = items[Number(button.dataset.resourceIndex)];
+            button.hidden = Boolean(query && !String(item?.name || '').toLowerCase().includes(query));
+        });
+    };
+    modal.querySelector('input[type="file"]').onchange = async event => {
+        for(const file of [...event.target.files]) await uploadImageToolFile(node, file, true);
+        closeImageToolReferencePicker();
+    };
+    useButton.onclick = () => {
+        node.references = Array.isArray(node.references) ? node.references : [];
+        [...chosen].forEach(index => {
+            const item = items[index];
+            if(item && !node.references.some(ref => ref.url === item.url)) node.references.push({url:item.url, name:item.name || 'image'});
+        });
+        closeImageToolReferencePicker();
+        refreshNodes([node.id]);
+        scheduleSave();
+    };
+    modal.querySelector('[data-resource-close]').onclick = closeImageToolReferencePicker;
+    modal.querySelector('[data-resource-cancel]').onclick = closeImageToolReferencePicker;
+    modal.onclick = event => { if(event.target === modal) closeImageToolReferencePicker(); };
+    refreshIcons();
+}
+function imageToolModelAliases(label){
+    const key = String(label || '').trim().toLowerCase();
+    const aliases = {
+        'g image 2':['gpt-image-2','gpt-image'],
+        '香蕉2':['nano-banana-2','nano-banana-pro','nano-banana'],
+        '香蕉pro':['nano-banana-pro','nano-banana'],
+        'seedream 5.0 pro':['seedream-v5','seedream-5','seedream'],
+        'seedream 4.5':['seedream-4.5','seedream'],
+        'kling o1':['kling-o1','kling'],
+        'kling o3':['kling-o3','kling']
+    };
+    return [String(label || '').trim(), ...(aliases[key] || [])].filter(Boolean);
+}
+function imageToolApiTarget(node){
+    const providers = imageApiProviders();
+    if(!providers.length) return {providerId:'', model:''};
+    const resolution = String(node?.resolution || '1k').trim().toLowerCase();
+    const candidates = imageToolModelAliases(node?.model);
+    const normalized = value => String(value || '').trim().toLowerCase();
+    const findInProvider = provider => {
+        const models = providerImageModels(provider.id);
+        for(const candidate of candidates){
+            const base = normalized(candidate);
+            if(!base) continue;
+            const resolutionModel = resolution === '1k' ? '' : models.find(model => normalized(model) === `${base}-${resolution}`);
+            if(resolutionModel) return resolutionModel;
+            const exact = models.find(model => normalized(model) === base);
+            if(exact) return exact;
+            const matchingResolution = resolution === '1k' ? '' : models.find(model => normalized(model).includes(base) && normalized(model).includes(resolution));
+            if(matchingResolution) return matchingResolution;
+            const partial = models.find(model => normalized(model).includes(base));
+            if(partial) return partial;
+        }
+        return '';
+    };
+    const preferred = providers.find(provider => provider.id === node?.apiProvider);
+    const ordered = preferred ? [preferred, ...providers.filter(provider => provider.id !== preferred.id)] : providers;
+    for(const provider of ordered){
+        const model = findInProvider(provider);
+        if(model){
+            node.apiProvider = provider.id;
+            node.apiModel = model;
+            return {providerId:provider.id, model};
+        }
+    }
+    const provider = preferred || providers[0];
+    const models = providerImageModels(provider.id);
+    const fallback = models.find(model => resolution !== '1k' && normalized(model).endsWith(`-${resolution}`)) || models[0] || '';
+    node.apiProvider = provider.id;
+    node.apiModel = fallback;
+    return {providerId:provider.id, model:fallback};
+}
+function syncImageToolModelForResolution(node){
+    const providerId = node?.apiProvider || imageToolApiTarget(node).providerId;
+    const models = providerImageModels(providerId);
+    if(!models.length) return;
+    const current = String(node?.apiModel || node?.model || '').trim();
+    const base = current.replace(/-(?:2k|4k)$/i, '');
+    const resolution = String(node?.resolution || '1k').toLowerCase();
+    const desired = resolution === '1k' ? base : `${base}-${resolution}`;
+    const matched = models.find(model => model.toLowerCase() === desired.toLowerCase());
+    if(!matched) return;
+    node.apiModel = matched;
+    node.model = matched;
+}
+function imageToolApiModel(node){
+    return imageToolApiTarget(node).model;
+}
+function imageToolSize(node){
+    return apiImageSize('custom', node?.resolution || '1k', node?.ratio || '1:1', '');
+}
+function imageToolInputRefs(node){
+    const refs = [];
+    if(node?.imageUrl) refs.push({url:node.imageUrl, name:node.imageName || '当前图片', kind:'image'});
+    (node?.references || []).forEach(reference => {
+        if(reference?.url) refs.push({url:reference.url, name:reference.name || '参考图', kind:'image'});
+    });
+    orderedSources(node, generatorSources(node)).forEach(source => {
+        (source.refs || []).forEach(reference => {
+            if(reference?.url) refs.push({...reference, kind:'image'});
+        });
+    });
+    const seen = new Set();
+    return imageRefsOnly(refs).filter(reference => reference.url && !seen.has(reference.url) && seen.add(reference.url));
+}
+function imageToolConnectedRefs(node){
+    const seen = new Set();
+    return imageRefsOnly(generatorSources(node).flatMap(source => source.refs || []))
+        .filter(reference => reference?.url && !seen.has(reference.url) && seen.add(reference.url));
+}
+function imageToolConnectedTextSources(node){
+    const seen = new Set();
+    return generatorSources(node)
+        .map(source => ({...source, prompt:String(source.prompt || '').trim()}))
+        .filter(source => source.prompt && !seen.has(source.prompt) && seen.add(source.prompt));
+}
+function imageToolEffectivePrompt(node){
+    const parts = [
+        String(node?.prompt || '').trim(),
+        ...orderedSources(node, generatorSources(node)).map(source => String(source.prompt || '').trim())
+    ].filter(Boolean);
+    return parts.join('\n\n');
+}
+async function runImageTool(node){
+    if(!node || node.running) return;
+    const prompt = imageToolEffectivePrompt(node);
+    const refs = imageToolInputRefs(node);
+    if(!prompt && !refs.length){ setStatus('请输入描述或添加参考图'); return; }
+    const target = imageToolApiTarget(node);
+    if(!target.providerId || !target.model){
+        showErrorModal('暂无可用的图片 API 平台或模型，请先在 API 设置中配置。', tr('canvas.apiFailed'));
+        return;
+    }
+    const runNode = {...node, apiProvider:target.providerId, apiModel:target.model};
+    delete runNode.generatedOutputs;
+    delete runNode.outputHistory;
+    delete runNode.lastOutputUrls;
+    delete runNode.lastRun;
+    const run = runSnapshot(runNode, prompt || 'Edit the reference images.', refs);
+    run.taskLabel = node.model || target.model;
+    run.request = {provider_id:target.providerId, model:target.model};
+    const startedAt = nowMs();
+    node.running = true;
+    node.runStatus = 'running';
+    node.runError = '';
+    refreshNodes([node.id]);
+    try {
+        const payload = {
+            prompt: prompt || 'Edit the reference images.',
+            provider_id: target.providerId,
+            model: target.model,
+            size: imageToolSize(node),
+            reference_images: refs
+        };
+        const quality = normalizedImageQuality({'低':'low','中':'medium','高':'high'}[node.quality] || node.quality);
+        if(quality) payload.quality = quality;
+        const taskInfos = await Promise.all(Array.from({length:Math.max(1, Math.min(4, Number(node.count || 1)))}, () => createCanvasImageTask(payload)));
+        const taskResults = await Promise.all(taskInfos.map(task => waitCanvasImageTaskResult(task.task_id)));
+        const results = taskResults.flatMap(result => result.images || []);
+        const url = outputUrlValue(results[0]);
+        if(!url) throw new Error(tr('canvas.generationFailed'));
+        run.request = {...run.request, ...requestMetaFromResult(taskResults[0] || {})};
+        mergeGeneratedOutputs(node, results, false);
+        const historyItems = results.map((item, index) => ({
+            url:outputUrlValue(item),
+            name:(item && typeof item === 'object' && item.name) || `生成图片 ${index + 1}`,
+            createdAt:Date.now(),
+            prompt:prompt || '',
+            providerId:target.providerId,
+            model:target.model,
+            size:payload.size
+        })).filter(item => item.url);
+        node.outputHistory = [...(node.outputHistory || []), ...historyItems].slice(-100);
+        node.lastOutputUrls = historyItems.map(item => item.url);
+        node.lastRun = {prompt:prompt || '', refs, providerId:target.providerId, model:target.model, size:payload.size, count:historyItems.length, createdAt:Date.now()};
+        setImageToolImage(node, url, '生成图片');
+        addGenerationLog({run, outputs:results, runMs:nowMs() - startedAt});
+        node.runStatus = 'done';
+        node.runError = '';
+        setStatus('Saved');
+    } catch(error){
+        node.runStatus = 'failed';
+        node.runError = error.message || String(error);
+        addGenerationLog({run, outputs:[], runMs:nowMs() - startedAt, error:node.runError});
+        showErrorModal(error.message || tr('canvas.generationFailed'), tr('canvas.apiFailed'));
+    } finally {
+        node.running = false;
+        refreshNodes([node.id]);
+        scheduleSave();
+    }
+}
+function collapseOpenImageTools(){
+    const opened = nodes.filter(node => ['imageTool','videoTool'].includes(node.type) && node.panelOpen);
+    if(!opened.length) return;
+    closeImageToolOptionMenu();
+    closeVideoToolOptionMenu();
+    opened.forEach(node => {
+        if(node.type === 'videoTool') syncVideoToolNodeSize(node, false);
+        else syncImageToolNodeSize(node, false);
+    });
+    refreshNodes(opened.map(node => node.id));
+    scheduleSave();
+}
+function addVideoToolNode(point){
+    const p = point || defaultPoint(0, 0);
+    const providerId = videoApiProviders()[0]?.id || 'comfly';
+    const model = providerVideoModels(providerId)[0] || DEFAULT_VIDEO_MODELS[0] || '';
+    return addNode({
+        id:uid('vidtool'),
+        type:'videoTool',
+        x:p.x,
+        y:p.y,
+        w:320,
+        h:272,
+        prompt:'',
+        panelOpen:false,
+        apiProvider:providerId,
+        model,
+        mode:'omni',
+        aspectRatio:'16:9',
+        resolution:'',
+        duration:5,
+        count:1,
+        enhancePrompt:false,
+        enableUpsample:false,
+        watermark:false,
+        cameraFixed:false,
+        generateAudio:false,
+        multimodal:true,
+        useFrameRoles:false,
+        videoUrl:'',
+        videoAspect:4 / 3,
+        videoFrameLongEdge:320,
+        references:[],
+        generatedOutputs:[],
+        outputHistory:[],
+        inputs:[]
+    });
+}
+const VIDEO_TOOL_DURATION_MIN = 4;
+const VIDEO_TOOL_DURATION_MAX = 15;
+function videoToolDurationValue(value){
+    const duration = Math.round(Number(value));
+    return Math.max(VIDEO_TOOL_DURATION_MIN, Math.min(VIDEO_TOOL_DURATION_MAX, Number.isFinite(duration) ? duration : 5));
+}
+function videoToolFrameSize(node){
+    const aspect = Math.max(.18, Math.min(5, Number(node?.videoAspect || 4 / 3) || 4 / 3));
+    const savedEdge = Number(node?.videoFrameLongEdge || Math.max(Number(node?.frameW || 0), Number(node?.frameH || 0)) || 320);
+    const edge = Math.max(160, Math.min(1200, savedEdge));
+    return aspect >= 1
+        ? {w:edge, h:Math.max(120, Math.round(edge / aspect))}
+        : {w:Math.max(120, Math.round(edge * aspect)), h:edge};
+}
+function syncVideoToolNodeSize(node, panelOpen=node?.panelOpen){
+    if(!node || node.type !== 'videoTool') return;
+    const frame = videoToolFrameSize(node);
+    node.frameW = frame.w;
+    node.frameH = frame.h;
+    node.panelOpen = Boolean(panelOpen);
+    node.w = frame.w;
+    node.h = 32 + frame.h;
+}
+function setVideoToolVideo(node, url, name='生成视频'){
+    if(!node || !url) return;
+    node.videoUrl = url;
+    node.videoName = name || '生成视频';
+    const probe = document.createElement('video');
+    probe.preload = 'metadata';
+    probe.onloadedmetadata = () => {
+        if(probe.videoWidth && probe.videoHeight){
+            node.videoAspect = probe.videoWidth / probe.videoHeight;
+            node.videoWidth = probe.videoWidth;
+            node.videoHeight = probe.videoHeight;
+        }
+        syncVideoToolNodeSize(node);
+        refreshNodes([node.id]);
+        scheduleSave();
+        probe.removeAttribute('src');
+        probe.load();
+    };
+    probe.src = url;
+    syncConnectedOutputsFromGenerated(node, [{url, name:node.videoName, kind:'video'}]);
+    refreshGeneratorInputViews();
+    syncVideoToolNodeSize(node);
+    refreshNodes([node.id]);
+    scheduleSave();
+}
+async function uploadVideoToolFile(node, file){
+    if(!node || !file || mediaKindForUpload(file) !== 'video') return;
+    const form = new FormData();
+    form.append('files', file);
+    const data = await fetch('/api/ai/upload', {method:'POST', body:form}).then(async response => {
+        if(!response.ok) throw new Error(await responseErrorMessage(response, '视频上传失败'));
+        return response.json();
+    });
+    const uploaded = data.files?.[0];
+    if(!uploaded?.url) throw new Error('视频上传失败');
+    const output = {url:uploaded.url, name:uploaded.name || file.name, kind:'video'};
+    mergeGeneratedOutputs(node, [output], false);
+    setVideoToolVideo(node, uploaded.url, uploaded.name || file.name);
+}
+function pickVideoToolUpload(node){
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'video/*';
+    input.onchange = async () => {
+        const file = input.files?.[0];
+        if(!file) return;
+        try { await uploadVideoToolFile(node, file); }
+        catch(error){ showErrorModal(error.message || '视频上传失败', '视频上传失败'); }
+    };
+    input.click();
+}
+function videoToolApiTarget(node){
+    const providerId = resolveVideoProviderId(node?.apiProvider || '');
+    const models = providerVideoModels(providerId);
+    const model = models.includes(node?.model) ? node.model : (models[0] || node?.model || '');
+    if(node){
+        node.apiProvider = providerId;
+        node.model = model;
+    }
+    return {providerId, model};
+}
+function videoToolInputRefs(node){
+    const refs = [
+        ...(node?.references || []),
+        ...orderedSources(node, generatorSources(node)).flatMap(source => source.refs || [])
+    ];
+    const seen = new Set();
+    return refs
+        .filter(reference => reference?.url && ['image','video','audio'].includes(mediaKindForRef(reference)))
+        .filter(reference => !seen.has(reference.url) && seen.add(reference.url));
+}
+function videoToolConnectedRefs(node){
+    const seen = new Set();
+    return generatorSources(node).flatMap(source => source.refs || [])
+        .filter(reference => reference?.url && ['image','video','audio'].includes(mediaKindForRef(reference)))
+        .filter(reference => reference?.url && !seen.has(reference.url) && seen.add(reference.url));
+}
+function videoToolConnectedTextSources(node){
+    const seen = new Set();
+    return generatorSources(node)
+        .map(source => ({...source, prompt:String(source.prompt || '').trim()}))
+        .filter(source => source.prompt && !seen.has(source.prompt) && seen.add(source.prompt));
+}
+function videoToolEffectivePrompt(node){
+    return [
+        String(node?.prompt || '').trim(),
+        ...orderedSources(node, generatorSources(node)).map(source => String(source.prompt || '').trim())
+    ].filter(Boolean).join('\n\n');
+}
+function videoToolModeLabel(node){
+    return node?.mode === 'frames' ? '首尾帧' : '全能参考';
+}
+let videoToolOptionCloseTimer = null;
+function cancelVideoToolOptionMenuClose(){
+    clearTimeout(videoToolOptionCloseTimer);
+    videoToolOptionCloseTimer = null;
+}
+function scheduleVideoToolOptionMenuClose(delay=180){
+    cancelVideoToolOptionMenuClose();
+    videoToolOptionCloseTimer = setTimeout(closeVideoToolOptionMenu, delay);
+}
+function openVideoToolOptionMenu(node, field, anchor){
+    if(!anchor) return;
+    closeVideoToolOptionMenu();
+    const target = videoToolApiTarget(node);
+    const menu = document.createElement('div');
+    menu.className = `image-tool-option-menu video-tool-option-menu image-tool-${field}-menu`;
+    if(field === 'provider'){
+        const providers = videoApiProviders();
+        menu.innerHTML = `<strong>API 平台</strong>${providers.length ? providers.map(provider => `<button type="button" class="image-tool-model-choice ${provider.id === target.providerId ? 'active' : ''}" data-field="provider" data-value="${escapeAttr(provider.id)}"><span><i data-lucide="globe-2"></i>${escapeHtml(provider.name || provider.id)}</span><small>${providerVideoModels(provider.id).length} 个视频模型</small>${provider.id === target.providerId ? '<i data-lucide="check" class="choice-check"></i>' : ''}</button>`).join('') : '<button type="button" disabled>请先在 API 设置中添加视频 API</button>'}`;
+    } else if(field === 'model'){
+        const models = providerVideoModels(target.providerId);
+        menu.innerHTML = `<strong>视频模型 · ${escapeHtml(providerById(target.providerId)?.name || target.providerId || 'API')}</strong>${models.length ? models.map(model => `<button type="button" class="image-tool-model-choice ${model === target.model ? 'active' : ''}" data-field="model" data-value="${escapeAttr(model)}"><span><i data-lucide="clapperboard"></i>${escapeHtml(model)}</span><small>视频生成</small>${model === target.model ? '<i data-lucide="check" class="choice-check"></i>' : ''}</button>`).join('') : '<button type="button" disabled>该 API 暂无视频模型</button>'}`;
+    } else if(field === 'mode'){
+        menu.innerHTML = `<strong>参考模式</strong>
+            <button type="button" class="image-tool-model-choice ${node.mode !== 'frames' ? 'active' : ''}" data-field="mode" data-value="omni"><span><i data-lucide="sparkles"></i>全能参考</span><small>可使用多张图片与文字</small>${node.mode !== 'frames' ? '<i data-lucide="check" class="choice-check"></i>' : ''}</button>
+            <button type="button" class="image-tool-model-choice ${node.mode === 'frames' ? 'active' : ''}" data-field="mode" data-value="frames"><span><i data-lucide="between-horizontal-start"></i>首尾帧</span><small>第 1、2 张图作为首尾帧</small>${node.mode === 'frames' ? '<i data-lucide="check" class="choice-check"></i>' : ''}</button>`;
+    } else if(field === 'settings'){
+        const ratios = ['16:9','9:16','1:1','4:3','3:4','21:9','adaptive'];
+        const resolutions = ['', '720p', '1080p', '2K'];
+        const duration = videoToolDurationValue(node.duration);
+        const durationProgress = ((duration - VIDEO_TOOL_DURATION_MIN) / (VIDEO_TOOL_DURATION_MAX - VIDEO_TOOL_DURATION_MIN)) * 100;
+        node.duration = duration;
+        menu.innerHTML = `
+            <strong>比例</strong>
+            <div class="image-tool-ratio-grid video-tool-ratio-grid">${ratios.map(choice => `<button type="button" class="${(node.aspectRatio || '16:9') === choice ? 'active' : ''}" data-field="aspectRatio" data-value="${escapeAttr(choice)}"><i data-ratio-icon="${escapeAttr(choice)}"></i><span>${choice === 'adaptive' ? '自适应' : escapeHtml(choice)}</span></button>`).join('')}</div>
+            <strong>清晰度</strong>
+            <div class="image-tool-segment video-tool-resolution-grid">${resolutions.map(choice => `<button type="button" class="${String(node.resolution || '') === choice ? 'active' : ''}" data-field="resolution" data-value="${escapeAttr(choice)}">${choice || 'Auto'}</button>`).join('')}</div>
+            <strong>时长</strong>
+            <div class="video-tool-duration-control" style="--video-duration-progress:${durationProgress}%">
+                <div class="video-tool-duration-readout"><span>${VIDEO_TOOL_DURATION_MIN}s</span><output data-video-tool-duration-output>${duration}s</output><span>${VIDEO_TOOL_DURATION_MAX}s</span></div>
+                <input type="range" min="${VIDEO_TOOL_DURATION_MIN}" max="${VIDEO_TOOL_DURATION_MAX}" step="1" value="${duration}" data-video-tool-duration aria-label="视频时长" aria-valuetext="${duration} 秒">
+                <div class="video-tool-duration-scale" aria-hidden="true">${Array.from({length:VIDEO_TOOL_DURATION_MAX - VIDEO_TOOL_DURATION_MIN + 1}, () => '<i></i>').join('')}</div>
+            </div>
+            <strong>附加能力</strong>
+            <div class="video-tool-toggle-grid">
+                ${[['enhancePrompt','优化提示词'],['enableUpsample','提升清晰度'],['cameraFixed','固定镜头'],['generateAudio','生成音频']].map(([key,label]) => `<button type="button" class="${node[key] ? 'active' : ''}" data-toggle="${key}"><i data-lucide="${node[key] ? 'check-square-2' : 'square'}"></i>${label}</button>`).join('')}
+            </div>`;
+    } else if(field === 'count'){
+        menu.innerHTML = `<strong>生成数量</strong>${[1,2,3,4].map(choice => `<button type="button" class="image-tool-count-choice ${Number(node.count || 1) === choice ? 'active' : ''}" data-field="count" data-value="${choice}">× ${choice}</button>`).join('')}`;
+    } else return;
+    document.body.appendChild(menu);
+    const rect = anchor.getBoundingClientRect();
+    const left = Math.max(12, Math.min(window.innerWidth - menu.offsetWidth - 12, rect.left));
+    const top = Math.max(12, rect.top - menu.offsetHeight - 10);
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+    menu._videoToolAnchor = anchor;
+    anchor.onpointerenter = cancelVideoToolOptionMenuClose;
+    anchor.onpointerleave = () => scheduleVideoToolOptionMenuClose();
+    menu.onpointerenter = cancelVideoToolOptionMenuClose;
+    menu.onpointerleave = () => scheduleVideoToolOptionMenuClose();
+    const durationRange = menu.querySelector('[data-video-tool-duration]');
+    if(durationRange){
+        const durationControl = menu.querySelector('.video-tool-duration-control');
+        const durationOutput = menu.querySelector('[data-video-tool-duration-output]');
+        const syncDuration = () => {
+            const duration = videoToolDurationValue(durationRange.value);
+            const progress = ((duration - VIDEO_TOOL_DURATION_MIN) / (VIDEO_TOOL_DURATION_MAX - VIDEO_TOOL_DURATION_MIN)) * 100;
+            node.duration = duration;
+            durationRange.value = String(duration);
+            durationRange.setAttribute('aria-valuetext', `${duration} 秒`);
+            if(durationOutput) durationOutput.textContent = `${duration}s`;
+            if(durationControl) durationControl.style.setProperty('--video-duration-progress', `${progress}%`);
+            const labelNode = [...anchor.childNodes].find(item => item.nodeType === Node.TEXT_NODE);
+            const label = `${node.aspectRatio || '16:9'} · ${node.resolution || 'Auto'} · ${duration}s`;
+            if(labelNode) labelNode.nodeValue = label;
+            else anchor.append(document.createTextNode(label));
+            scheduleSave();
+        };
+        durationRange.onpointerdown = event => {
+            event.stopPropagation();
+            cancelVideoToolOptionMenuClose();
+        };
+        durationRange.onclick = event => event.stopPropagation();
+        durationRange.oninput = event => {
+            event.stopPropagation();
+            syncDuration();
+        };
+        durationRange.onchange = event => {
+            event.stopPropagation();
+            syncDuration();
+        };
+    }
+    menu.querySelectorAll('[data-field]').forEach(button => {
+        button.onclick = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const value = button.dataset.value || '';
+            const targetField = button.dataset.field;
+            if(targetField === 'provider'){
+                node.apiProvider = value;
+                node.model = providerVideoModels(value)[0] || '';
+            } else if(targetField === 'count' || targetField === 'duration') node[targetField] = Number(value) || 1;
+            else {
+                node[targetField] = value;
+                if(targetField === 'mode'){
+                    node.useFrameRoles = value === 'frames';
+                    node.multimodal = value !== 'frames';
+                }
+            }
+            refreshNodes([node.id]);
+            scheduleSave();
+            if(['aspectRatio','resolution','duration'].includes(targetField)){
+                requestAnimationFrame(() => {
+                    const nextAnchor = nodesEl.querySelector(`.video-tool-node[data-id="${CSS.escape(node.id)}"] [data-video-tool-option="settings"]`);
+                    if(nextAnchor) openVideoToolOptionMenu(node, 'settings', nextAnchor);
+                });
+            } else closeVideoToolOptionMenu();
+        };
+    });
+    menu.querySelectorAll('[data-toggle]').forEach(button => {
+        button.onclick = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const key = button.dataset.toggle;
+            node[key] = !node[key];
+            refreshNodes([node.id]);
+            scheduleSave();
+            requestAnimationFrame(() => {
+                const nextAnchor = nodesEl.querySelector(`.video-tool-node[data-id="${CSS.escape(node.id)}"] [data-video-tool-option="settings"]`);
+                if(nextAnchor) openVideoToolOptionMenu(node, 'settings', nextAnchor);
+            });
+        };
+    });
+    refreshIcons();
+}
+function closeVideoToolOptionMenu(){
+    cancelVideoToolOptionMenuClose();
+    const menu = document.querySelector('.video-tool-option-menu');
+    if(menu?._videoToolAnchor){
+        menu._videoToolAnchor.onpointerenter = null;
+        menu._videoToolAnchor.onpointerleave = null;
+    }
+    menu?.remove();
+}
+async function runVideoTool(node, opts={}){
+    if(!node || (node.running && !opts.cascade)) return;
+    const promptInput = videoToolEffectivePrompt(node);
+    const mediaRefs = videoToolInputRefs(node);
+    const imageRefs = imageRefsOnly(mediaRefs);
+    const videoRefs = videoRefsOnly(mediaRefs);
+    const audioRefs = audioRefsOnly(mediaRefs);
+    if(!promptInput && !mediaRefs.length){ setStatus('请输入视频描述或添加参考素材'); return; }
+    const prompt = promptInput || 'Animate the reference image naturally with coherent motion.';
+    const target = videoToolApiTarget(node);
+    if(!target.providerId || !target.model){
+        showErrorModal('暂无可用的视频 API 平台或模型，请先在 API 设置中配置。', tr('canvas.apiFailed'));
+        return;
+    }
+    const runNode = {...node, apiProvider:target.providerId, model:target.model};
+    delete runNode.generatedOutputs;
+    delete runNode.outputHistory;
+    delete runNode.lastOutputUrls;
+    delete runNode.lastRun;
+    const runImages = imageRefs.map((reference, index) => node.mode === 'frames' && index < 2
+        ? {...reference, role:index === 0 ? 'first_frame' : 'last_frame'}
+        : {...reference, role:'reference_image'});
+    const runMediaRefs = [...runImages, ...videoRefs, ...audioRefs];
+    const run = runSnapshot(runNode, prompt, runMediaRefs);
+    run.taskLabel = target.model;
+    run.request = {provider_id:target.providerId, model:target.model};
+    const startedAt = nowMs();
+    node.running = true;
+    node.runStatus = 'running';
+    node.runError = '';
+    refreshNodes([node.id]);
+    try {
+        const payload = {
+            prompt,
+            provider_id:target.providerId,
+            model:target.model,
+            duration:videoToolDurationValue(node.duration),
+            aspect_ratio:node.aspectRatio || '16:9',
+            resolution:node.resolution || '',
+            images:runImages,
+            videos:videoRefs.map(reference => reference.url),
+            audios:audioRefs.map(reference => reference.url),
+            enhance_prompt:Boolean(node.enhancePrompt),
+            enable_upsample:Boolean(node.enableUpsample),
+            watermark:Boolean(node.watermark),
+            camerafixed:Boolean(node.cameraFixed),
+            generate_audio:Boolean(node.generateAudio),
+            multimodal:node.mode !== 'frames'
+        };
+        const results = await Promise.all(Array.from({length:Math.max(1, Math.min(4, Number(node.count || 1)))}, () => cascadeFetch('/api/canvas-video', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(payload)
+        }, {cascadeTargetId:cascadeTargetIdFromOptions(opts)}).then(async response => {
+            if(!response.ok) throw new Error(await responseErrorMessage(response, tr('canvas.videoFailed')));
+            return response.json();
+        })));
+        const outputs = results.flatMap(result => resultMediaUrls(result)).map(item => {
+            const url = outputUrlValue(item);
+            return item && typeof item === 'object' ? {...item, url, kind:'video'} : {url, kind:'video'};
+        }).filter(item => item.url);
+        if(!outputs.length) throw new Error(tr('canvas.videoFailed'));
+        run.request = {...run.request, ...requestMetaFromResult(results[0] || {})};
+        mergeGeneratedOutputs(node, outputs, Boolean(opts.cascade));
+        syncConnectedOutputsFromGenerated(node, outputs);
+        const historyItems = outputs.map((item, index) => ({
+            url:item.url,
+            name:item.name || `生成视频 ${index + 1}`,
+            kind:'video',
+            createdAt:Date.now(),
+            prompt,
+            providerId:target.providerId,
+            model:target.model,
+            aspectRatio:payload.aspect_ratio,
+            resolution:payload.resolution,
+            duration:payload.duration
+        }));
+        node.outputHistory = [...(node.outputHistory || []), ...historyItems].slice(-100);
+        node.lastOutputUrls = historyItems.map(item => item.url);
+        node.lastRun = {prompt, refs:runRefs, providerId:target.providerId, model:target.model, aspectRatio:payload.aspect_ratio, resolution:payload.resolution, duration:payload.duration, count:outputs.length, createdAt:Date.now()};
+        setVideoToolVideo(node, outputs[0].url, outputs[0].name || '生成视频');
+        addGenerationLog({run, outputs, runMs:nowMs() - startedAt});
+        node.runStatus = 'done';
+        node.runError = '';
+        setStatus('Saved');
+    } catch(error){
+        node.runStatus = 'failed';
+        node.runError = error.message || String(error);
+        addGenerationLog({run, outputs:[], runMs:nowMs() - startedAt, error:node.runError});
+        if(opts.cascade) throw error;
+        showErrorModal(error.message || tr('canvas.videoFailed'), tr('canvas.apiFailed'));
+    } finally {
+        node.running = false;
+        refreshNodes([node.id]);
+        scheduleSave();
+    }
 }
 function addLoopNode(point){
     const p = point || defaultPoint(40, 0);
@@ -2750,6 +3652,7 @@ function toggleAddNodePalette(e){
     e?.stopPropagation();
     const shouldOpen = !addNodePalette?.classList.contains('open');
     closeAddNodePalette();
+    closeCreateNodeDrawer();
     if(!shouldOpen) return;
     addNodePalette?.classList.add('open');
     addNodeMenuToggle?.classList.add('active');
@@ -2758,6 +3661,7 @@ function toggleAddNodePalette(e){
 }
 function closeCreateMenu(){
     closeAddNodePalette();
+    closeCreateNodeDrawer();
     createMenu.classList.remove('open');
     closeLinkCreateMenu();
     closeImageNodeMenu();
@@ -2767,13 +3671,28 @@ addNodePalette?.querySelectorAll('[data-add-node-placeholder]').forEach(item => 
     item.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
+        if(item.dataset.addNodePlaceholder === 'text'){
+            const point = {...menuPoint};
+            closeCreateMenu();
+            addTextNode(point);
+        }
+        if(item.dataset.addNodePlaceholder === 'image'){
+            const point = {...menuPoint};
+            closeCreateMenu();
+            addImageToolNode(point);
+        }
+        if(item.dataset.addNodePlaceholder === 'video'){
+            const point = {...menuPoint};
+            closeCreateMenu();
+            addVideoToolNode(point);
+        }
     });
 });
 function linkCreateOptions(state){
     const node = nodes.find(n => n.id === state?.originId);
     if(!node) return [];
     if(state.originKind === 'out'){
-        if(['image','prompt','loop','group','promptGroup','llm','output'].includes(node.type)){
+        if(['image','prompt','text','loop','group','promptGroup','llm','output','imageTool','videoTool'].includes(node.type)){
             return [
                 {type:'generator', label:tr('canvas.apiGenerate'), icon:'wand-sparkles'},
                 {type:'msgen', label:tr('canvas.modelscopeGenerate'), icon:'cloud-lightning'},
@@ -2789,6 +3708,7 @@ function linkCreateOptions(state){
     if(CANVAS_GENERATOR_TYPES.includes(node.type) || node.type === 'llm'){
         return [
             {type:'image', label:tr('canvas.imageCard'), icon:'image-plus'},
+            {type:'text', label:'文本', icon:'file-text'},
             {type:'prompt', label:tr('canvas.prompt'), icon:'text-cursor-input'},
             {type:'loop', label:tr('canvas.loopNode'), icon:'repeat-2'},
             {type:'group', label:tr('canvas.group'), icon:'group'},
@@ -2915,6 +3835,86 @@ function openImageNodePreview(nodeId){
     const kind = mediaKindForNode(node);
     if(!['image','video'].includes(kind)) return;
     openOutputLightbox(node.url, node);
+}
+let activeImageLinkPopover = null;
+function closeImageLinkPopover(){
+    if(!activeImageLinkPopover) return;
+    activeImageLinkPopover.remove();
+    activeImageLinkPopover = null;
+    document.removeEventListener('mousedown', onImageLinkPopoverOutside, true);
+    document.removeEventListener('keydown', onImageLinkPopoverKey, true);
+}
+function onImageLinkPopoverOutside(e){
+    if(activeImageLinkPopover && !activeImageLinkPopover.contains(e.target)){
+        closeImageLinkPopover();
+    }
+}
+function onImageLinkPopoverKey(e){
+    if(e.key === 'Escape') closeImageLinkPopover();
+}
+function absoluteImageUrl(url){
+    if(!url) return '';
+    if(/^(https?:|data:|blob:|\/)/i.test(url)) return url;
+    return url;
+}
+function showImageLinkPopover(node, anchorEl){
+    closeImageLinkPopover();
+    if(!node?.url) return;
+    const url = absoluteImageUrl(node.url);
+    const pop = document.createElement('div');
+    pop.className = 'image-link-popover';
+    pop.innerHTML = `
+        <div class="image-link-popover-title"><i data-lucide="link" class="w-3.5 h-3.5"></i><span>图片链接</span><button type="button" class="image-link-popover-close" aria-label="关闭"><i data-lucide="x" class="w-3.5 h-3.5"></i></button></div>
+        <div class="image-link-popover-body">
+            <textarea readonly class="image-link-popover-url" rows="3">${escapeHtml(url)}</textarea>
+            <div class="image-link-popover-actions">
+                <button type="button" class="image-link-popover-open" data-act="open"><i data-lucide="external-link" class="w-3.5 h-3.5"></i><span>打开</span></button>
+                <button type="button" class="image-link-popover-copy primary" data-act="copy"><i data-lucide="copy" class="w-3.5 h-3.5"></i><span>复制链接</span></button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(pop);
+    activeImageLinkPopover = pop;
+    const rect = anchorEl.getBoundingClientRect();
+    const popRect = pop.getBoundingClientRect();
+    const margin = 8;
+    let left = rect.right + margin;
+    let top = rect.top;
+    if(left + popRect.width > window.innerWidth - 8){
+        left = rect.left - popRect.width - margin;
+    }
+    if(left < 8) left = 8;
+    if(top + popRect.height > window.innerHeight - 8){
+        top = Math.max(8, window.innerHeight - popRect.height - 8);
+    }
+    pop.style.left = `${left + window.scrollX}px`;
+    pop.style.top = `${top + window.scrollY}px`;
+    const textarea = pop.querySelector('textarea');
+    textarea.focus();
+    textarea.select();
+    pop.querySelector('.image-link-popover-close').addEventListener('click', closeImageLinkPopover);
+    pop.querySelector('[data-act="open"]').addEventListener('click', () => {
+        window.open(url, '_blank', 'noopener');
+    });
+    pop.querySelector('[data-act="copy"]').addEventListener('click', async () => {
+        try{
+            await navigator.clipboard.writeText(url);
+        } catch(err){
+            textarea.select();
+            try{ document.execCommand('copy'); }catch(e2){}
+        }
+        const btn = pop.querySelector('[data-act="copy"] span');
+        if(btn){
+            const prev = btn.textContent;
+            btn.textContent = '已复制';
+            setTimeout(() => { btn.textContent = prev; }, 1200);
+        }
+    });
+    setTimeout(() => {
+        document.addEventListener('mousedown', onImageLinkPopoverOutside, true);
+        document.addEventListener('keydown', onImageLinkPopoverKey, true);
+    }, 0);
+    if(typeof refreshIcons === 'function') refreshIcons();
 }
 function openOutputNodeMenu(nodeId, clientX, clientY){
     const node = nodes.find(n => n.id === nodeId);
@@ -3145,6 +4145,7 @@ function createLinkedNode(type){
 }
 function createNodeByType(type, point){
     if(type === 'image') return addImageNode(point);
+    if(type === 'text') return addTextNode(point);
     if(type === 'prompt') return addPromptNode(point);
     if(type === 'loop') return addLoopNode(point);
     if(type === 'group') return addGroupNode(point);
@@ -3152,6 +4153,7 @@ function createNodeByType(type, point){
     if(type === 'generator') return addGeneratorNode(point);
     if(type === 'msgen') return addMsGenNode(point);
     if(type === 'video') return addVideoNode(point);
+    if(type === 'videoTool') return addVideoToolNode(point);
     if(type === 'rh') return addRhNode(point);
     if(type === 'comfy') return addComfyNode(point);
     if(type === 'ltxDirector') return addLTXDirectorNode(point);
@@ -3172,6 +4174,50 @@ function menuAdd(type){
     if(type === 'ltxDirector') addLTXDirectorNode(menuPoint);
     if(type === 'output') addOutputNode(menuPoint);
 }
+function toggleCreateNodeDrawer(e){
+    e?.preventDefault();
+    e?.stopPropagation();
+    const shouldOpen = !createNodeDrawer?.classList.contains('open');
+    closeCreateNodeDrawer();
+    closeAddNodePalette();
+    if(!shouldOpen) return;
+    if(!createNodeDrawer) return;
+    createNodeDrawer.classList.add('open');
+    createNodeMenuToggle?.classList.add('active');
+    createNodeMenuToggle?.setAttribute('aria-expanded', 'true');
+    refreshIcons();
+}
+function closeCreateNodeDrawer(){
+    if(!createNodeDrawer) return;
+    createNodeDrawer.classList.remove('open');
+    createNodeMenuToggle?.classList.remove('active');
+    createNodeMenuToggle?.setAttribute('aria-expanded', 'false');
+}
+function handleCreateNodeDrawerItem(type){
+    if(!type) return;
+    const point = {...menuPoint};
+    closeCreateMenu();
+    // 复用项目自带的 createNodeByType 工厂（支持的类型见其实现）
+    if(typeof createNodeByType === 'function'){
+        createNodeByType(type, point);
+        return;
+    }
+    if(type === 'prompt') addPromptNode(point);
+    else if(type === 'loop') addLoopNode(point);
+    else if(type === 'llm') addLLMNode(point);
+    else if(type === 'generator') addGeneratorNode(point);
+    else if(type === 'msgen') addMsGenNode(point);
+    else if(type === 'rh') addRhNode(point);
+    else if(type === 'comfy') addComfyNode(point);
+    else if(type === 'ltxDirector') addLTXDirectorNode(point);
+}
+document.getElementById('createNodeDrawer')?.querySelectorAll('[data-drawer-node]').forEach(btn => {
+    btn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        handleCreateNodeDrawerItem(btn.dataset.drawerNode);
+    });
+});
 function mediaKindForUpload(file){
     const type = String(file?.type || '').toLowerCase();
     const name = String(file?.name || '').toLowerCase();
@@ -5373,7 +6419,7 @@ function restoreOutputScrolls(state){
     });
 }
 function isNodeControl(target){
-    return !!target.closest('textarea, input, select, option, button, audio, video, [contenteditable="true"], .seg, .gen-btn, .comfy-run, .input-item, .blank-image, .mode-tabs, .ms-model-tabs, .llm-provider, .llm-output, .llm-chat-log, .llm-bubble, .llm-pane-resizer, .loop-preview, .ltx-director-timeline-host, .pr-wrapper, .pr-toolbar, .pr-viewport, .pr-canvas, .pr-player-controls, .pr-prompt-area');
+    return !!target.closest('textarea, input, select, option, button, audio, [contenteditable="true"], .seg, .gen-btn, .comfy-run, .input-item, .blank-image, .mode-tabs, .ms-model-tabs, .llm-provider, .llm-output, .llm-chat-log, .llm-bubble, .llm-pane-resizer, .loop-preview, .ltx-director-timeline-host, .pr-wrapper, .pr-toolbar, .pr-viewport, .pr-canvas, .pr-player-controls, .pr-prompt-area');
 }
 function destroyLTXEditor(node){
     if(!node?._ltxEditor) return;
@@ -5381,18 +6427,32 @@ function destroyLTXEditor(node){
     node._ltxEditor = null;
 }
 function isNodeDragSurface(target){
-    return !isNodeControl(target) && !target.closest('.port, .resize-handle, .output-img-wrap');
+    return !isNodeControl(target) && !target.closest('.port, .resize-handle');
 }
 function renderNode(node){
     normalizeApiNodeLayout(node);
+    if(node.type === 'imageTool') syncImageToolNodeSize(node, node.panelOpen);
+    if(node.type === 'videoTool') syncVideoToolNodeSize(node, node.panelOpen);
     if(node.type === 'rh' && Number(node.h) === 560) delete node.h;
     const el = document.createElement('div');
     const size = defaultNodeSize(node.type);
     const hasFixedSize = Boolean(node.h || size.h);
     el.className = `node ${node.type}-node ${node.url ? 'has-image' : ''} ${hasFixedSize ? 'sized' : ''} ${selected.has(node.id) ? 'selected' : ''}`;
+    if(node.type === 'imageTool') el.classList.add('image-tool-node', ...(node.panelOpen ? ['image-tool-panel-open'] : []));
+    if(node.type === 'videoTool') el.classList.add('image-tool-node', 'video-tool-node', ...(node.panelOpen ? ['video-tool-panel-open'] : []));
     el.style.left = `${node.x}px`;
     el.style.top = `${node.y}px`;
     el.style.width = `${node.w || size.w}px`;
+    if(node.type === 'imageTool'){
+        const frame = imageToolFrameSize(node);
+        el.style.setProperty('--image-frame-w', `${frame.w}px`);
+        el.style.setProperty('--image-frame-h', `${frame.h}px`);
+    }
+    if(node.type === 'videoTool'){
+        const frame = videoToolFrameSize(node);
+        el.style.setProperty('--image-frame-w', `${frame.w}px`);
+        el.style.setProperty('--image-frame-h', `${frame.h}px`);
+    }
     if(node.h || size.h) el.style.height = `${node.h || size.h}px`;
     el.dataset.id = node.id;
     el.onclick = (e) => {
@@ -5409,10 +6469,10 @@ function renderNode(node){
         if(node.type === 'output') openOutputNodeMenu(node.id, e.clientX, e.clientY);
         else openGeneratorNodeMenu(node.id, e.clientX, e.clientY);
     };
-    const title = node.type === 'image' ? 'Image' : node.type === 'prompt' ? 'Prompt' : node.type === 'loop' ? tr('canvas.loopNode') : node.type === 'promptGroup' ? 'Prompts' : node.type === 'group' ? 'Group' : node.type === 'output' ? 'Output' : node.type === 'llm' ? 'LLM' : node.type === 'comfy' ? 'ComfyUI' : node.type === 'ltxDirector' ? tr('canvas.ltxDirector') : node.type === 'rh' ? 'RunningHub' : node.type === 'msgen' ? tr('canvas.modelscopeGenerate') : node.type === 'video' ? tr('canvas.videoGenerateNode') : tr('canvas.apiGenerate');
+    const title = node.type === 'image' ? 'Image' : node.type === 'imageTool' ? '图片' : node.type === 'videoTool' ? '视频' : node.type === 'text' ? `${node.name || '新建文本文档.txt'} - 记事本` : node.type === 'prompt' ? 'Prompt' : node.type === 'loop' ? tr('canvas.loopNode') : node.type === 'promptGroup' ? 'Prompts' : node.type === 'group' ? 'Group' : node.type === 'output' ? 'Output' : node.type === 'llm' ? 'LLM' : node.type === 'comfy' ? 'ComfyUI' : node.type === 'ltxDirector' ? tr('canvas.ltxDirector') : node.type === 'rh' ? 'RunningHub' : node.type === 'msgen' ? tr('canvas.modelscopeGenerate') : node.type === 'video' ? tr('canvas.videoGenerateNode') : tr('canvas.apiGenerate');
     const displayTitle = node.type === 'image' && node.url ? nodeTitleForMedia(node) : title;
     // 失败徽章只在一键运行模式中显示，单节点失败已通过 alert 提示
-    const showStatus = ['generator','msgen','comfy','ltxDirector','llm','video','rh'].includes(node.type) && node.runStatus
+    const showStatus = ['generator','msgen','comfy','ltxDirector','llm','video','rh','imageTool','videoTool'].includes(node.type) && node.runStatus
         && (node.runStatus !== 'failed' || node._cascadeFailed);
     const statusHtml = showStatus ? (() => {
         const label = { queued:'排队中', running:'运行中', done:'完成', failed:'失败' }[node.runStatus] || '';
@@ -5426,12 +6486,13 @@ function renderNode(node){
             const missing = isMissingAssetUrl(node.url);
             const mediaKind = mediaKindForNode(node);
             const isEditableImage = mediaKind === 'image' && !missing;
-            body.innerHTML = `<div class="image-preview-wrap">${missing ? missingAssetHtml(node.url) : canvasPreviewImgHtml(node.url, 768, 'draggable="false"')}</div><div class="image-caption text-[11px] text-gray-400 truncate">${escapeHtml(node.name || 'image')}${missing ? ` · ${langIsEn() ? 'missing' : '文件缺失'}` : ''}</div>`;
+            const linkBtnHtml = missing ? '' : `<button type="button" class="image-link-btn" data-action="show-image-link" title="查看图片链接" aria-label="查看图片链接"><i data-lucide="link" class="w-3.5 h-3.5"></i></button>`;
+            body.innerHTML = `<div class="image-preview-wrap">${linkBtnHtml}${missing ? missingAssetHtml(node.url) : canvasPreviewImgHtml(node.url, 768, 'draggable="false"')}</div><div class="image-caption text-[11px] text-gray-400 truncate">${escapeHtml(node.name || 'image')}${missing ? ` · ${langIsEn() ? 'missing' : '文件缺失'}` : ''}</div>`;
             if(!missing && mediaKind !== 'image'){
                 const mediaHtml = mediaKind === 'video'
                     ? `<div class="media-card video-card">${canvasVideoPreviewHtml(node.url, 768, 'draggable="false" data-video-fallback-attrs="controls"')}<button class="canvas-video-play" type="button" title="播放"><i data-lucide="play"></i></button></div>`
                     : `<div class="media-card audio-card"><i data-lucide="file-audio" class="w-8 h-8"></i><div class="audio-title">${escapeHtml(node.name || 'Audio')}</div><div class="audio-sub">AUDIO</div><audio src="${escapeAttr(node.url)}" data-url="${escapeAttr(node.url)}" controls preload="metadata"></audio></div>`;
-                body.innerHTML = `<div class="image-preview-wrap">${mediaHtml}</div><div class="image-caption text-[11px] text-gray-400 truncate">${escapeHtml(node.name || nodeTitleForMedia(node))}</div>`;
+                body.innerHTML = `<div class="image-preview-wrap">${linkBtnHtml}${mediaHtml}</div><div class="image-caption text-[11px] text-gray-400 truncate">${escapeHtml(node.name || nodeTitleForMedia(node))}</div>`;
             }
             const previewWrap = body.querySelector('.image-preview-wrap');
             const loadedImg = body.querySelector('img');
@@ -5496,6 +6557,21 @@ function renderNode(node){
                 }, true);
             }
             body.addEventListener('dblclick', openPreview, true);
+            const linkBtn = body.querySelector('.image-link-btn');
+            if(linkBtn && !missing){
+                const showLink = e => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
+                    showImageLinkPopover(node, linkBtn);
+                };
+                linkBtn.addEventListener('mousedown', e => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
+                }, true);
+                linkBtn.addEventListener('click', showLink, true);
+            }
             if(loadedImg && loadedImg.complete && loadedImg.naturalHeight > 0){
                 requestAnimationFrame(refreshGeometry);
             } else if(loadedImg) {
@@ -5527,6 +6603,362 @@ function renderNode(node){
             scheduleSave();
             syncGeneratorInputs();
             refreshGeneratorInputViews();
+        };
+    }
+    if(node.type === 'text') {
+        body.classList.add('txt-node-body');
+        body.innerHTML = `
+            <div class="txt-editor">
+                <div class="txt-menubar" aria-hidden="true">
+                    <span>文件</span><span>编辑</span><span>格式</span><span>查看</span><span>帮助</span>
+                </div>
+                <textarea class="txt-editor-area" aria-label="文本编辑器" spellcheck="false" placeholder="在此输入文字……"></textarea>
+                <div class="txt-statusbar">
+                    <span data-txt-position>第 1 行，第 1 列</span>
+                    <span>100%</span><span>Windows (CRLF)</span><span>UTF-8</span>
+                </div>
+            </div>`;
+        const textarea = body.querySelector('.txt-editor-area');
+        const position = body.querySelector('[data-txt-position]');
+        textarea.value = node.text || '';
+        bindScrollableText(textarea);
+        const refreshPosition = () => {
+            const caret = Math.max(0, Number(textarea.selectionStart || 0));
+            const before = textarea.value.slice(0, caret);
+            const line = before.split('\n').length;
+            const lastBreak = before.lastIndexOf('\n');
+            const column = caret - lastBreak;
+            position.textContent = `第 ${line} 行，第 ${column} 列`;
+        };
+        textarea.oninput = e => {
+            node.text = e.target.value;
+            refreshPosition();
+            scheduleSave();
+        };
+        textarea.onkeyup = refreshPosition;
+        textarea.onclick = refreshPosition;
+        textarea.onselect = refreshPosition;
+        textarea.onkeydown = e => {
+            if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's'){
+                e.preventDefault();
+                scheduleSave();
+                setStatus('Saved');
+            }
+            if(e.key === 'Tab'){
+                e.preventDefault();
+                const start = textarea.selectionStart;
+                const end = textarea.selectionEnd;
+                textarea.setRangeText('\t', start, end, 'end');
+                textarea.dispatchEvent(new Event('input', {bubbles:true}));
+            }
+        };
+        refreshPosition();
+    }
+    if(node.type === 'imageTool') {
+        const frame = imageToolFrameSize(node);
+        const manualReferences = Array.isArray(node.references) ? node.references : [];
+        const manualUrls = new Set(manualReferences.map(reference => reference?.url).filter(Boolean));
+        const connectedReferences = imageToolConnectedRefs(node)
+            .filter(reference => !manualUrls.has(reference.url) && reference.url !== node.imageUrl)
+            .map(reference => ({...reference, connected:true}));
+        const connectedTextSources = imageToolConnectedTextSources(node);
+        const references = [
+            ...manualReferences.map((reference, manualIndex) => ({...reference, manualIndex})),
+            ...connectedReferences
+        ];
+        const imageTarget = imageToolApiTarget(node);
+        const imageProvider = imageApiProviders().find(provider => provider.id === imageTarget.providerId);
+        body.classList.add('image-tool-body');
+        body.innerHTML = `
+            <div class="image-tool-shell ${node.panelOpen ? 'panel-open' : ''}" style="--image-frame-w:${frame.w}px;--image-frame-h:${frame.h}px">
+                <button class="image-tool-upload" type="button" title="上传图片"><i data-lucide="upload"></i><span>上传图片</span></button>
+                <button class="image-tool-preview ${node.running ? 'is-generating' : ''}" type="button" title="打开图片编辑" aria-busy="${node.running ? 'true' : 'false'}">
+                    ${node.imageUrl ? `<img src="${escapeAttr(node.imageUrl)}" alt="${escapeAttr(node.imageName || '图片')}" draggable="false">` : '<i data-lucide="image" class="image-tool-preview-icon"></i>'}
+                    <span class="image-tool-preview-add"><i data-lucide="plus"></i></span>
+                    ${node.running ? `
+                        <span class="image-tool-generation-overlay" role="status" aria-live="polite">
+                            <span class="image-tool-generation-glow"></span>
+                            <span class="image-tool-generation-content">
+                                <span class="image-tool-generation-mark"><i data-lucide="sparkles"></i></span>
+                                <strong>正在生成图片</strong>
+                                <small>正在创作，请稍候…</small>
+                                <span class="image-tool-generation-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                            </span>
+                        </span>` : ''}
+                </button>
+                ${['n','ne','e','se','s','sw','w','nw'].map(direction => `<span class="image-tool-resize-zone image-tool-resize-${direction}" data-image-tool-resize="${direction}" aria-hidden="true"></span>`).join('')}
+                <button class="image-tool-delete" type="button" title="删除图片节点" aria-label="删除图片节点"><i data-lucide="trash-2"></i></button>
+                <div class="image-tool-panel">
+                    <button class="image-tool-add" type="button" title="添加参考图"><i data-lucide="plus"></i></button>
+                    <div class="image-tool-references">${references.map(reference => `<button type="button" title="${escapeAttr(reference.connected ? `已连接 · ${reference.name || '参考图'}` : (reference.name || '参考图'))}"><img src="${escapeAttr(reference.url)}" alt="">${reference.connected ? '<span class="image-tool-connected-reference"><i data-lucide="link-2"></i></span>' : `<span data-remove-reference="${reference.manualIndex}"><i data-lucide="x"></i></span>`}</button>`).join('')}${connectedTextSources.map(source => `<button type="button" class="image-tool-text-reference" title="${escapeAttr(`已连接文本 · ${source.prompt}`)}"><i data-lucide="file-text"></i><em>文本</em><span class="image-tool-connected-reference"><i data-lucide="link-2"></i></span></button>`).join('')}</div>
+                    <button class="image-tool-expand" type="button" title="展开"><i data-lucide="expand"></i></button>
+                    <textarea class="image-tool-prompt" placeholder="描述你想要生成的内容"></textarea>
+                    <div class="image-tool-footer">
+                        <div class="image-tool-meta">
+                            <button type="button" data-image-tool-option="provider"><i data-lucide="globe-2"></i>${escapeHtml(imageProvider?.name || imageTarget.providerId || '选择 API')}</button>
+                            <span class="image-tool-divider"></span>
+                            <button type="button" data-image-tool-option="model"><i data-lucide="aperture"></i>${escapeHtml(node.model || imageTarget.model || '选择模型')}</button>
+                            <span class="image-tool-divider"></span>
+                            <button type="button" data-image-tool-option="settings"><i data-lucide="square"></i>${escapeHtml(node.ratio || '1:1')} · ${escapeHtml(node.resolution || '1k')} · ${escapeHtml(node.quality || '中')}</button>
+                            <span class="image-tool-divider"></span>
+                            <button type="button" data-image-tool-option="count">× ${Number(node.count || 1)}</button>
+                        </div>
+                        <button class="image-tool-submit" type="button" title="生成" ${node.running ? 'disabled' : ''}><i data-lucide="${node.running ? 'loader-circle' : 'arrow-up'}"></i></button>
+                    </div>
+                </div>
+            </div>`;
+        const preview = body.querySelector('.image-tool-preview');
+        preview.onmousedown = e => {
+            if(e.button !== 0) return;
+            if(e.detail >= 2 && node.imageUrl && !isMissingAssetUrl(node.imageUrl)){
+                e.preventDefault();
+                e.stopPropagation();
+                openOutputLightbox(node.imageUrl, node);
+                return;
+            }
+            if(document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+            if(e.ctrlKey || e.metaKey){
+                selected.has(node.id) ? selected.delete(node.id) : selected.add(node.id);
+            } else if(!selected.has(node.id)) {
+                selected.clear();
+                selected.add(node.id);
+            }
+            refreshSelectionVisuals();
+            startNodeDrag(e, node);
+            if(dragNode){
+                dragNode.moved = false;
+                dragNode.suppressClickNodeId = node.id;
+            }
+        };
+        preview.onclick = e => {
+            e.preventDefault();
+            e.stopPropagation();
+            if(Number(node._suppressImageToolClickUntil || 0) > Date.now()){
+                return;
+            }
+            if(!node.panelOpen){
+                syncImageToolNodeSize(node, true);
+                scheduleSave();
+                refreshNodes([node.id]);
+            }
+        };
+        preview.ondblclick = e => {
+            e.preventDefault();
+            e.stopPropagation();
+            if(!node.imageUrl || isMissingAssetUrl(node.imageUrl)) return;
+            openOutputLightbox(node.imageUrl, node);
+        };
+        body.querySelectorAll('[data-image-tool-resize]').forEach(handle => {
+            handle.onmousedown = e => startImageToolResize(e, node, handle.dataset.imageToolResize || 'se');
+            handle.onclick = e => { e.preventDefault(); e.stopPropagation(); };
+        });
+        const textarea = body.querySelector('.image-tool-prompt');
+        textarea.value = node.prompt || '';
+        bindScrollableText(textarea);
+        textarea.oninput = e => {
+            node.prompt = e.target.value;
+            scheduleSave();
+        };
+        body.querySelectorAll('[data-image-tool-option]').forEach(btn => {
+            btn.onclick = e => {
+                e.preventDefault();
+                e.stopPropagation();
+                openImageToolOptionMenu(node, btn.dataset.imageToolOption, btn);
+            };
+        });
+        body.querySelector('.image-tool-upload').onclick = e => {
+            e.preventDefault();
+            e.stopPropagation();
+            pickImageToolUpload(node, false);
+        };
+        body.querySelector('.image-tool-delete').onclick = e => deleteNodeFromButton(node.id, e);
+        body.querySelector('.image-tool-add').onclick = e => {
+            e.preventDefault();
+            e.stopPropagation();
+            openImageToolReferencePicker(node);
+        };
+        body.querySelectorAll('[data-remove-reference]').forEach(button => {
+            button.onclick = e => {
+                e.preventDefault();
+                e.stopPropagation();
+                node.references.splice(Number(button.dataset.removeReference), 1);
+                refreshNodes([node.id]);
+                scheduleSave();
+            };
+        });
+        body.querySelector('.image-tool-expand').onclick = e => { e.preventDefault(); e.stopPropagation(); textarea.focus(); };
+        body.querySelector('.image-tool-submit').onclick = e => { e.preventDefault(); e.stopPropagation(); runImageTool(node); };
+    }
+    if(node.type === 'videoTool') {
+        const frame = videoToolFrameSize(node);
+        const manualReferences = Array.isArray(node.references) ? node.references : [];
+        const manualUrls = new Set(manualReferences.map(reference => reference?.url).filter(Boolean));
+        const connectedReferences = videoToolConnectedRefs(node)
+            .filter(reference => !manualUrls.has(reference.url))
+            .map(reference => ({...reference, connected:true}));
+        const connectedTextSources = videoToolConnectedTextSources(node);
+        let imageReferenceIndex = 0;
+        const references = [
+            ...manualReferences.map((reference, manualIndex) => ({...reference, manualIndex})),
+            ...connectedReferences
+        ].map(reference => ({
+            ...reference,
+            imageReferenceIndex:mediaKindForRef(reference) === 'image' ? imageReferenceIndex++ : -1,
+        }));
+        const target = videoToolApiTarget(node);
+        const provider = videoApiProviders().find(item => item.id === target.providerId);
+        const promptLength = String(node.prompt || '').length;
+        body.classList.add('image-tool-body', 'video-tool-body');
+        body.innerHTML = `
+            <div class="image-tool-shell video-tool-shell ${node.panelOpen ? 'panel-open' : ''}" style="--image-frame-w:${frame.w}px;--image-frame-h:${frame.h}px">
+                <button class="image-tool-upload video-tool-upload" type="button" title="上传视频"><i data-lucide="upload"></i><span>上传视频</span></button>
+                <div class="image-tool-preview video-tool-preview ${node.running ? 'is-generating' : ''}" title="${node.videoUrl ? '点击展开，双击预览视频' : '点击展开视频生成面板'}" aria-busy="${node.running ? 'true' : 'false'}">
+                    ${node.videoUrl ? `<video class="video-tool-media" src="${escapeAttr(node.videoUrl)}" preload="metadata" controls playsinline draggable="false"></video>` : `
+                        <span class="video-tool-empty">
+                            <span class="video-tool-empty-icon"><i data-lucide="play"></i></span>
+                            <strong>尝试 ${escapeHtml(target.model || '视频模型')}</strong>
+                            <small>输入提示词或添加参考图开始创作</small>
+                            <span><i data-lucide="sparkles"></i> 全能参考</span>
+                            <span><i data-lucide="gallery-horizontal-end"></i> 首尾帧</span>
+                        </span>`}
+                    ${node.running ? `
+                        <span class="image-tool-generation-overlay video-tool-generation-overlay" role="status" aria-live="polite">
+                            <span class="image-tool-generation-glow"></span>
+                            <span class="image-tool-generation-content">
+                                <span class="image-tool-generation-mark"><i data-lucide="clapperboard"></i></span>
+                                <strong>正在生成视频</strong>
+                                <small>正在渲染画面，请稍候…</small>
+                                <span class="image-tool-generation-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                            </span>
+                        </span>` : ''}
+                </div>
+                ${['n','ne','e','se','s','sw','w','nw'].map(direction => `<span class="image-tool-resize-zone image-tool-resize-${direction}" data-video-tool-resize="${direction}" aria-hidden="true"></span>`).join('')}
+                <button class="image-tool-delete video-tool-delete" type="button" title="删除视频节点" aria-label="删除视频节点"><i data-lucide="trash-2"></i></button>
+                <div class="image-tool-panel video-tool-panel">
+                    <button class="image-tool-add video-tool-add" type="button" title="添加参考图"><i data-lucide="plus"></i></button>
+                    <div class="image-tool-references video-tool-references">${references.map(reference => {
+                        const kind = mediaKindForRef(reference);
+                        const label = kind === 'audio' ? '参考音频' : kind === 'video' ? '参考视频' : '参考图';
+                        const preview = kind === 'image'
+                            ? `<img src="${escapeAttr(reference.url)}" alt="">`
+                            : `<i data-lucide="${kind === 'audio' ? 'file-audio' : 'file-video'}"></i><em>${label}</em>`;
+                        const frameRole = node.mode === 'frames' && reference.imageReferenceIndex >= 0 && reference.imageReferenceIndex < 2
+                            ? `<b class="video-tool-frame-role">${reference.imageReferenceIndex === 0 ? '首' : '尾'}</b>`
+                            : '';
+                        const control = reference.connected
+                            ? '<span class="image-tool-connected-reference"><i data-lucide="link-2"></i></span>'
+                            : `<span data-remove-video-reference="${reference.manualIndex}"><i data-lucide="x"></i></span>`;
+                        return `<button type="button" class="${kind === 'image' ? '' : 'image-tool-text-reference'}" title="${escapeAttr(reference.connected ? `已连接 · ${reference.name || label}` : (reference.name || label))}">${preview}${frameRole}${control}</button>`;
+                    }).join('')}${connectedTextSources.map(source => `<button type="button" class="image-tool-text-reference" title="${escapeAttr(`已连接文本 · ${source.prompt}`)}"><i data-lucide="file-text"></i><em>文本</em><span class="image-tool-connected-reference"><i data-lucide="link-2"></i></span></button>`).join('')}</div>
+                    <button class="image-tool-expand video-tool-collapse" type="button" title="收起"><i data-lucide="chevron-down"></i></button>
+                    <textarea class="image-tool-prompt video-tool-prompt" maxlength="7000" placeholder="描述你要生成的视频内容，或探索 H3 创作指南 ↗"></textarea>
+                    <span class="video-tool-counter">${promptLength.toLocaleString()} / 7,000</span>
+                    <div class="image-tool-footer video-tool-footer">
+                        <div class="image-tool-meta video-tool-meta">
+                            <button type="button" data-video-tool-option="provider"><i data-lucide="globe-2"></i>${escapeHtml(provider?.name || target.providerId || '选择 API')}</button>
+                            <span class="image-tool-divider"></span>
+                            <button type="button" data-video-tool-option="model"><i data-lucide="clapperboard"></i>${escapeHtml(target.model || '选择模型')}</button>
+                            <span class="image-tool-divider"></span>
+                            <button type="button" data-video-tool-option="mode"><i data-lucide="sparkles"></i>${videoToolModeLabel(node)}</button>
+                            <span class="image-tool-divider"></span>
+                            <button type="button" data-video-tool-option="settings"><i data-lucide="rectangle-horizontal"></i>${escapeHtml(node.aspectRatio || '16:9')} · ${escapeHtml(node.resolution || 'Auto')} · ${videoToolDurationValue(node.duration)}s</button>
+                            <span class="image-tool-divider"></span>
+                            <button type="button" data-video-tool-option="count">× ${Number(node.count || 1)}</button>
+                        </div>
+                        <button class="image-tool-submit video-tool-submit" type="button" title="生成视频" ${node.running ? 'disabled' : ''}><i data-lucide="${node.running ? 'loader-circle' : 'arrow-up'}"></i></button>
+                    </div>
+                </div>
+            </div>`;
+        const preview = body.querySelector('.video-tool-preview');
+        preview.onmousedown = event => {
+            if(event.button !== 0 || event.target.closest('video,button')) return;
+            if(document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+            if(event.ctrlKey || event.metaKey){
+                selected.has(node.id) ? selected.delete(node.id) : selected.add(node.id);
+            } else if(!selected.has(node.id)) {
+                selected.clear();
+                selected.add(node.id);
+            }
+            refreshSelectionVisuals();
+            startNodeDrag(event, node);
+            if(dragNode){
+                dragNode.moved = false;
+                dragNode.suppressClickNodeId = node.id;
+            }
+        };
+        preview.onclick = event => {
+            if(event.target.closest('video')) return;
+            event.preventDefault();
+            event.stopPropagation();
+            if(Number(node._suppressVideoToolClickUntil || 0) > Date.now()) return;
+            if(!node.panelOpen){
+                syncVideoToolNodeSize(node, true);
+                refreshNodes([node.id]);
+                scheduleSave();
+            }
+        };
+        const video = body.querySelector('.video-tool-media');
+        if(video){
+            video.onmousedown = event => event.stopPropagation();
+            video.onclick = event => event.stopPropagation();
+            video.ondblclick = event => {
+                event.preventDefault();
+                event.stopPropagation();
+                openOutputLightbox(node.videoUrl, node);
+            };
+        }
+        body.querySelectorAll('[data-video-tool-resize]').forEach(handle => {
+            handle.onmousedown = event => startVideoToolResize(event, node, handle.dataset.videoToolResize || 'se');
+            handle.onclick = event => { event.preventDefault(); event.stopPropagation(); };
+        });
+        const textarea = body.querySelector('.video-tool-prompt');
+        textarea.value = node.prompt || '';
+        bindScrollableText(textarea);
+        textarea.oninput = event => {
+            node.prompt = event.target.value;
+            const counter = body.querySelector('.video-tool-counter');
+            if(counter) counter.textContent = `${event.target.value.length.toLocaleString()} / 7,000`;
+            scheduleSave();
+        };
+        body.querySelectorAll('[data-video-tool-option]').forEach(button => {
+            button.onclick = event => {
+                event.preventDefault();
+                event.stopPropagation();
+                openVideoToolOptionMenu(node, button.dataset.videoToolOption, button);
+            };
+        });
+        body.querySelector('.video-tool-upload').onclick = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            pickVideoToolUpload(node);
+        };
+        body.querySelector('.video-tool-delete').onclick = event => deleteNodeFromButton(node.id, event);
+        body.querySelector('.video-tool-add').onclick = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            openImageToolReferencePicker(node);
+        };
+        body.querySelectorAll('[data-remove-video-reference]').forEach(button => {
+            button.onclick = event => {
+                event.preventDefault();
+                event.stopPropagation();
+                node.references.splice(Number(button.dataset.removeVideoReference), 1);
+                refreshNodes([node.id]);
+                scheduleSave();
+            };
+        });
+        body.querySelector('.video-tool-collapse').onclick = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            closeVideoToolOptionMenu();
+            syncVideoToolNodeSize(node, false);
+            refreshNodes([node.id]);
+            scheduleSave();
+        };
+        body.querySelector('.video-tool-submit').onclick = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            runVideoTool(node);
         };
     }
     if(node.type === 'loop') body.appendChild(renderLoopBody(node));
@@ -5582,15 +7014,19 @@ function renderNode(node){
     }
     el.appendChild(body);
     el.querySelectorAll('button, select, textarea, input').forEach(control => {
-        control.addEventListener('mousedown', e => e.stopPropagation(), true);
+        // 图片工具的预览框本身就是拖拽与选中区域，不能被通用按钮保护提前截断。
+        // 它自己的 mousedown 会负责选中节点并启动拖拽。
+        if(!control.classList.contains('image-tool-preview')){
+            control.addEventListener('mousedown', e => e.stopPropagation(), true);
+        }
         control.addEventListener('click', e => e.stopPropagation());
     });
     el.onmousedown = e => {
         if(e.button !== 0 || !isNodeDragSurface(e.target)) return;
         startNodeDrag(e, node);
     };
-    const canInput = ['generator','comfy','ltxDirector','output','llm','msgen','video','rh'].includes(node.type) || (node.type === 'loop' && (node.imageInput || node.showPrompt));
-    const canOutput = ['image','prompt','loop','group','promptGroup','generator','comfy','ltxDirector','llm','msgen','video','rh','output'].includes(node.type);
+    const canInput = ['generator','comfy','ltxDirector','output','llm','msgen','video','rh','imageTool','videoTool'].includes(node.type) || (node.type === 'loop' && (node.imageInput || node.showPrompt));
+    const canOutput = ['image','prompt','text','loop','group','promptGroup','generator','comfy','ltxDirector','llm','msgen','video','rh','output','imageTool','videoTool'].includes(node.type);
     if(canInput) el.insertAdjacentHTML('beforeend', `<div class="port in" title="${tr('canvas.connectHere')}"></div>`);
     if(canOutput) el.insertAdjacentHTML('beforeend', `<div class="port out" title="${tr('canvas.dragConnect')}"></div>`);
     el.insertAdjacentHTML('beforeend', `<div class="resize-handle" title="${tr('canvas.resize')}"></div>`);
@@ -5641,6 +7077,8 @@ function bindOutputWrap(wrap, node){
         };
     }
     if(video){
+        video.draggable = false;
+        video.ondragstart = e => { e.preventDefault(); e.stopPropagation(); };
         video.onclick = e => {
             e.stopPropagation();
             openOutputLightbox(video.dataset.url, node);
@@ -5757,6 +7195,9 @@ function refreshOutputNodeContent(node){
 }
 function defaultNodeSize(type){
     if(type === 'image') return {w:260, h:336};
+    if(type === 'imageTool') return {w:300, h:332};
+    if(type === 'videoTool') return {w:320, h:272};
+    if(type === 'text') return {w:430, h:320};
     if(type === 'prompt') return {w:310, h:0};
     if(type === 'loop') return {w:336, h:0};
     if(type === 'llm') return {w:420, h:590};
@@ -5853,6 +7294,7 @@ function imageRefsFromNode(node){
             .filter(url => url && !isVideoUrl(url) && !isAudioUrl(url))
             .map((url, i) => ({url, name:outputImageName(url) || `output-${i + 1}.png`, kind:'image'}));
     }
+    if(node.type === 'imageTool' && node.imageUrl) return [{url:node.imageUrl, name:node.imageName || 'image', kind:'image'}];
     if(CANVAS_IMAGE_OUTPUT_TYPES.includes(node.type)) return generatedImageRefs(node).filter(ref => ref.kind === 'image');
     return [];
 }
@@ -9219,9 +10661,9 @@ function updateComfyField(node, input, event){
     scheduleSave();
 }
 
-const CANVAS_GENERATOR_TYPES = ['generator','msgen','comfy','ltxDirector','video','rh'];
-const CANVAS_IMAGE_OUTPUT_TYPES = ['generator','msgen','comfy','ltxDirector','rh'];
-const CANVAS_MEDIA_OUTPUT_TYPES = ['generator','msgen','comfy','ltxDirector','video','rh'];
+const CANVAS_GENERATOR_TYPES = ['generator','msgen','comfy','ltxDirector','video','rh','imageTool','videoTool'];
+const CANVAS_IMAGE_OUTPUT_TYPES = ['generator','msgen','comfy','ltxDirector','rh','imageTool'];
+const CANVAS_MEDIA_OUTPUT_TYPES = ['generator','msgen','comfy','ltxDirector','video','rh','imageTool','videoTool'];
 function hasExplicitOutputConnection(nodeId){
     return connections.some(c => {
         if(c.from !== nodeId) return false;
@@ -9268,7 +10710,9 @@ function outputNodesForSource(nodeId){
         .filter(n => n?.type === 'output');
 }
 function latestGeneratedOutputItem(node){
-    return [...(node?.generatedOutputs || [])].reverse().find(item => outputUrlValue(item));
+    return [...(node?.generatedOutputs || [])].reverse().find(item => outputUrlValue(item))
+        || (node?.type === 'imageTool' && node.imageUrl ? node.imageUrl : null)
+        || (node?.type === 'videoTool' && node.videoUrl ? {url:node.videoUrl, name:node.videoName || 'video', kind:'video'} : null);
 }
 function outputHasUrl(out, url){
     return Boolean(url && (out?.images || []).some(item => outputUrlValue(item) === url));
@@ -9296,7 +10740,7 @@ function syncConnectedOutputsFromGenerated(node, outputs){
     outputNodesForSource(node.id).forEach(out => appendOutputImagesWithoutDuplicates(out, list));
 }
 function generatedImageRefs(node){
-    const keepGeneratedMedia = ['rh','ltxDirector','video'].includes(node?.type);
+    const keepGeneratedMedia = ['rh','ltxDirector','video','videoTool'].includes(node?.type);
     return (node?.generatedOutputs || [])
         .map((item, i) => {
             const url = outputUrlValue(item);
@@ -9331,6 +10775,12 @@ function mediaRefsFromNode(node){
             return {url, name:outputImageName(url) || `output-${i + 1}`, kind, nodeId:node.id, outputIndex:i};
         }).filter(Boolean);
     }
+    if(node.type === 'imageTool' && node.imageUrl){
+        return [{url:node.imageUrl, name:node.imageName || 'image', kind:'image'}];
+    }
+    if(node.type === 'videoTool' && node.videoUrl){
+        return [{url:node.videoUrl, name:node.videoName || 'video', kind:'video'}];
+    }
     if(CANVAS_MEDIA_OUTPUT_TYPES.includes(node.type)) return generatedImageRefs(node);
     return [];
 }
@@ -9345,6 +10795,16 @@ function generatorSources(gen){
                 const kind = mediaKindForOutputItem(found.item);
                 return {id:n.id, type:'outputImage', label:'上游输出', preview:last, refs:[{url:last, name:'output.png', kind, nodeId:n.id, outputIndex:found.index}], prompt:''};
             }
+        }
+        if(n.type === 'imageTool' && n.imageUrl){
+            return {
+                id:n.id,
+                type:'imageToolImage',
+                label:n.imageName || '上游图片',
+                preview:n.imageUrl,
+                refs:[{url:n.imageUrl, name:n.imageName || 'image', kind:'image'}],
+                prompt:''
+            };
         }
         if(CANVAS_MEDIA_OUTPUT_TYPES.includes(n.type)){
             const refs = generatedImageRefs(n);
@@ -9390,6 +10850,7 @@ function generatorSources(gen){
             return sources;
         }
         if(n.type === 'prompt') return {id:n.id, type:'prompt', label:(n.text || '提示词').slice(0, 32), refs:[], prompt:n.text || ''};
+        if(n.type === 'text') return {id:n.id, type:'text', label:(n.name || n.text || '文本').slice(0, 32), refs:[], prompt:n.text || ''};
         if(n.type === 'loop') {
             const ctx = gen?._activeLoopCtx || loopContext || null;
             const prompt = renderLoopPrompt(n, ctx);
@@ -9461,6 +10922,7 @@ function refreshGeneratorInputViews(){
             renderComfyImages(el.querySelector('.input-list'), gen, imageInputs);
         }
         if(gen.type === 'video') renderVideoImageInputs(el.querySelector('.video-img-list'), gen, imageInputs);
+        if(gen.type === 'videoTool') refreshNodes([gen.id]);
         if(gen.type === 'rh'){
             const media = rhMediaSources(gen);
             renderRhPromptFields(el.querySelector('.rh-prompt-list'), gen, rhActiveFields(gen));
@@ -9619,12 +11081,13 @@ async function runVideoNode(nodeId, opts={}){
     const allRefs = sources.flatMap(s => s.refs || []);
     const refs = applyUploadedUrlToRefs(imageRefsOnly(allRefs), node);
     const videoRefs = applyUploadedUrlToRefs(videoRefsOnly(allRefs), node);
+    const audioRefs = applyUploadedUrlToRefs(audioRefsOnly(allRefs), node);
     if(node.useFrameRoles && refs[0]) refs[0] = {...refs[0], role:'first_frame'};
     if(node.useFrameRoles && refs[1]) refs[1] = {...refs[1], role:'last_frame'};
     if(!prompt){ alert(tr('canvas.videoNeedsPrompt')); return; }
     let out = outputForNode(node, 460);
     const pendingId = uid('p');
-    const run = runSnapshot(node, prompt, refs);
+    const run = runSnapshot(node, prompt, [...refs, ...videoRefs, ...audioRefs]);
     if(out) out._pending = [...(out._pending || []), makePendingForRun(pendingId, run, node, {refs, cascadeTargetId})];
     if(!opts.cascade){ node.running = true; refreshRunNodes(node, out); }
     else refreshRunNodes(node, out);
@@ -9643,6 +11106,7 @@ async function runVideoNode(nodeId, opts={}){
                 videos:manualVideoUrlForNode(node)
                     ? [manualVideoUrlForNode(node)]
                     : videoRefs.map(ref => tempShUploadedUrlForNode(node, ref.url)),
+                audios:audioRefs.map(ref => ref.url),
                 enhance_prompt:Boolean(node.enhancePrompt),
                 enable_upsample:Boolean(node.enableUpsample),
                 watermark:Boolean(node.watermark),
@@ -10663,7 +12127,9 @@ function runCascadeNodeByType(node, opts={}){
     if(node.type === 'ltxDirector') return runLTXDirectorNode(node.id, runOpts);
     if(node.type === 'llm') return runLLMNode(node.id, runOpts);
     if(node.type === 'video') return runVideoNode(node.id, runOpts);
+    if(node.type === 'videoTool') return runVideoTool(node, runOpts);
     if(node.type === 'rh') return runRhNode(node.id, runOpts);
+    if(node.type === 'imageTool') return runImageTool(node);
     return Promise.resolve();
 }
 async function runCascadeNodeWithLoopContext(node, ctx, opts={}){
@@ -10697,7 +12163,7 @@ async function runLimitedCascadeRounds(rounds, limit, runner){
     return Promise.allSettled(workers);
 }
 function canvasRunTypes(){
-    return ['generator','msgen','comfy','ltxDirector','llm','video','rh'];
+    return ['generator','msgen','comfy','ltxDirector','llm','video','rh','imageTool','videoTool'];
 }
 function canvasWorkflowEdges(){
     const runTypes = canvasRunTypes();
@@ -10964,6 +12430,7 @@ async function runOneCascadePass(order, options={}){
             else if(node.type === 'ltxDirector') await runLTXDirectorNode(id, {cascade:true, cascadeTargetId:targetId});
             else if(node.type === 'llm') await runLLMNode(id, {cascade:true, cascadeTargetId:targetId});
             else if(node.type === 'video') await runVideoNode(id, {cascade:true, cascadeTargetId:targetId});
+            else if(node.type === 'videoTool') await runVideoTool(node, {cascade:true, cascadeTargetId:targetId});
             else if(node.type === 'rh') await runRhNode(id, {cascade:true, cascadeTargetId:targetId});
             if(targetId) ensureCascadeActive(targetId);
             node.runStatus = 'done';
@@ -11141,7 +12608,9 @@ function runTaskLabel(run){
     if(run?.nodeType === 'comfy') return comfyRunLabel(node);
     if(run?.nodeType === 'ltxDirector') return tr('canvas.ltxDirector');
     if(run?.nodeType === 'generator') return node.model || 'API Image';
+    if(run?.nodeType === 'imageTool') return run?.taskLabel || node.model || node.apiModel || 'API Image';
     if(run?.nodeType === 'video') return node.model || 'Video';
+    if(run?.nodeType === 'videoTool') return run?.taskLabel || node.model || 'Video';
     if(run?.nodeType === 'msgen') return node.msCustomModel || node.msgenModel || 'Modelscope';
     return run?.nodeType || 'Generate';
 }
@@ -11159,8 +12628,10 @@ function requestMetaFromResult(result={}){
 function runPlatformLabel(run){
     const node = run?.node || {};
     if(run?.nodeType === 'generator') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'API';
+    if(run?.nodeType === 'imageTool') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'API';
     if(run?.nodeType === 'msgen') return 'Modelscope';
     if(run?.nodeType === 'video') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'Video';
+    if(run?.nodeType === 'videoTool') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'Video';
     if(run?.nodeType === 'comfy') return 'ComfyUI';
     if(run?.nodeType === 'ltxDirector') return 'ComfyUI';
     return run?.nodeType || 'Generate';
@@ -11311,11 +12782,11 @@ function makePendingForRun(id, run, node, options={}, task={}){
 }
 function mergeGeneratedOutputs(node, outputs, append=false){
     if(!node) return;
-    const keepGeneratedMedia = ['rh','ltxDirector','video'].includes(node.type);
+    const keepGeneratedMedia = ['rh','ltxDirector','video','videoTool'].includes(node.type);
     const clean = (outputs || []).map(item => {
         const url = outputUrlValue(item);
         if(!url) return null;
-        const kind = node.type === 'video'
+        const kind = ['video','videoTool'].includes(node.type)
             ? 'video'
             : ['rh','ltxDirector'].includes(node.type) && isVideoUrl(url)
                 ? 'video'
@@ -12879,6 +14350,7 @@ function startNodeDrag(e, node){
 }
 function onNodeDrag(e){
     if(!dragNode) return;
+    if(Math.hypot(e.clientX - dragNode.sx, e.clientY - dragNode.sy) > 4) dragNode.moved = true;
     const dx = (e.clientX - dragNode.sx) / viewport.scale;
     const dy = (e.clientY - dragNode.sy) / viewport.scale;
     dragNode.node.x = dragNode.ox + dx;
@@ -12918,8 +14390,107 @@ function startNodeResize(e, node){
     window.onmousemove = onNodeResize;
     window.onmouseup = endDrag;
 }
+function startImageToolResize(e, node, direction='se'){
+    if(e.button !== 0 || !node || !['imageTool','videoTool'].includes(node.type)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation?.();
+    if(document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+    if(!selected.has(node.id)){
+        selected.clear();
+        selected.add(node.id);
+        refreshSelectionVisuals();
+    }
+    const frame = node.type === 'videoTool' ? videoToolFrameSize(node) : imageToolFrameSize(node);
+    resizeNode = {
+        node,
+        imageTool:true,
+        mediaToolType:node.type,
+        direction:String(direction || 'se'),
+        sx:e.clientX,
+        sy:e.clientY,
+        sw:frame.w,
+        sh:frame.h,
+        sox:Number(node.x || 0),
+        soy:Number(node.y || 0),
+        startEdge:Math.max(frame.w, frame.h),
+        moved:false,
+        historyPushed:false
+    };
+    document.body.classList.add('canvas-node-resize', 'canvas-image-tool-resize');
+    window.onmousemove = onNodeResize;
+    window.onmouseup = endDrag;
+}
+function startVideoToolResize(e, node, direction='se'){
+    startImageToolResize(e, node, direction);
+}
 function onNodeResize(e){
     if(!resizeNode) return;
+    resizePendingPointer = {clientX:e.clientX, clientY:e.clientY};
+    if(resizeFrameId) return;
+    resizeFrameId = requestAnimationFrame(flushNodeResize);
+}
+function flushNodeResize(){
+    resizeFrameId = 0;
+    const pointer = resizePendingPointer;
+    resizePendingPointer = null;
+    if(!resizeNode || !pointer) return;
+    applyNodeResize(pointer);
+}
+function applyNodeResize(e){
+    if(!resizeNode) return;
+    if(resizeNode.imageTool){
+        const direction = resizeNode.direction;
+        const dx = (e.clientX - resizeNode.sx) / viewport.scale;
+        const dy = (e.clientY - resizeNode.sy) / viewport.scale;
+        const horizontalSign = direction.includes('w') ? -1 : 1;
+        const verticalSign = direction.includes('n') ? -1 : 1;
+        const horizontalScale = (resizeNode.sw + horizontalSign * dx) / Math.max(1, resizeNode.sw);
+        const verticalScale = (resizeNode.sh + verticalSign * dy) / Math.max(1, resizeNode.sh);
+        let scale;
+        const hasHorizontal = direction.includes('e') || direction.includes('w');
+        const hasVertical = direction.includes('n') || direction.includes('s');
+        if(hasHorizontal && hasVertical){
+            scale = Math.abs(horizontalScale - 1) >= Math.abs(verticalScale - 1) ? horizontalScale : verticalScale;
+        } else {
+            scale = hasHorizontal ? horizontalScale : verticalScale;
+        }
+        const nextEdge = Math.max(120, Math.min(1200, Math.round(resizeNode.startEdge * scale)));
+        const isVideoTool = resizeNode.mediaToolType === 'videoTool';
+        const currentFrame = isVideoTool ? videoToolFrameSize(resizeNode.node) : imageToolFrameSize(resizeNode.node);
+        if(Math.abs(nextEdge - Math.max(currentFrame.w, currentFrame.h)) < 1) return;
+        if(!resizeNode.historyPushed){
+            pushUndo();
+            resizeNode.historyPushed = true;
+        }
+        resizeNode.moved = true;
+        if(isVideoTool) resizeNode.node.videoFrameLongEdge = nextEdge;
+        else resizeNode.node.imageFrameLongEdge = nextEdge;
+        const frame = isVideoTool ? videoToolFrameSize(resizeNode.node) : imageToolFrameSize(resizeNode.node);
+        if(isVideoTool) syncVideoToolNodeSize(resizeNode.node, resizeNode.node.panelOpen);
+        else syncImageToolNodeSize(resizeNode.node, resizeNode.node.panelOpen);
+        if(direction.includes('w')) resizeNode.node.x = resizeNode.sox + (resizeNode.sw - frame.w);
+        else if(!hasHorizontal) resizeNode.node.x = resizeNode.sox + (resizeNode.sw - frame.w) / 2;
+        else resizeNode.node.x = resizeNode.sox;
+        if(direction.includes('n')) resizeNode.node.y = resizeNode.soy + (resizeNode.sh - frame.h);
+        else if(!hasVertical) resizeNode.node.y = resizeNode.soy + (resizeNode.sh - frame.h) / 2;
+        else resizeNode.node.y = resizeNode.soy;
+        const el = nodesEl.querySelector(`.node[data-id="${CSS.escape(resizeNode.node.id)}"]`);
+        if(el){
+            el.style.left = `${resizeNode.node.x}px`;
+            el.style.top = `${resizeNode.node.y}px`;
+            el.style.width = `${resizeNode.node.w}px`;
+            el.style.height = `${resizeNode.node.h}px`;
+            el.style.setProperty('--image-frame-w', `${frame.w}px`);
+            el.style.setProperty('--image-frame-h', `${frame.h}px`);
+            const shell = el.querySelector('.image-tool-shell');
+            shell?.style.setProperty('--image-frame-w', `${frame.w}px`);
+            shell?.style.setProperty('--image-frame-h', `${frame.h}px`);
+        }
+        // 图片节点缩放时只更新当前节点。连线、选择层和缩略图会在松开鼠标后统一刷新，
+        // 避免高频 pointermove 不断重建整个画布，造成明显卡顿。
+        return;
+    }
     const min = defaultNodeSize(resizeNode.node.type);
     const nextW = Math.max(Math.min(min.w, 220), resizeNode.sw + (e.clientX - resizeNode.sx) / viewport.scale);
     const nextH = Math.max(96, resizeNode.sh + (e.clientY - resizeNode.sy) / viewport.scale);
@@ -13032,6 +14603,7 @@ function canConnect(fromId, toId){
     if(!from || !to) return false;
     if(CANVAS_GENERATOR_TYPES.includes(from.type)){
         if(to.type === 'output') return true;
+        if(to.type === 'loop' && CANVAS_IMAGE_OUTPUT_TYPES.includes(from.type)) return Boolean(to.imageInput) && !wouldCreateGeneratorCycle(fromId, toId);
         if(CANVAS_MEDIA_OUTPUT_TYPES.includes(from.type) && CANVAS_GENERATOR_TYPES.includes(to.type)){
             return !wouldCreateGeneratorCycle(fromId, toId);
         }
@@ -13042,17 +14614,40 @@ function canConnect(fromId, toId){
         const allowPrompt = Boolean(to.showPrompt) && ['prompt','promptGroup','loop','llm'].includes(from.type);
         return allowImage || allowPrompt;
     }
-    if(to.type === 'llm') return ['prompt','loop','promptGroup','llm','image','group','output'].includes(from.type);
+    if(to.type === 'llm') return ['prompt','text','loop','promptGroup','llm','image','group','output'].includes(from.type);
     if(from.type === 'llm') return CANVAS_GENERATOR_TYPES.includes(to.type);
-    return CANVAS_GENERATOR_TYPES.includes(to.type) && ['image','prompt','loop','group','promptGroup','output','llm'].includes(from.type);
+    return CANVAS_GENERATOR_TYPES.includes(to.type) && ['image','prompt','text','loop','group','promptGroup','output','llm'].includes(from.type);
 }
 function sanitizeConnections(){
     connections = (connections || []).filter(c => canConnect(c.from, c.to));
 }
 function endDrag(event=null){
+    if(resizeFrameId){
+        cancelAnimationFrame(resizeFrameId);
+        resizeFrameId = 0;
+    }
+    if(resizeNode && resizePendingPointer){
+        const pointer = resizePendingPointer;
+        resizePendingPointer = null;
+        applyNodeResize(pointer);
+    } else {
+        resizePendingPointer = null;
+    }
+    const hadResize = Boolean(resizeNode);
     const hadContentDrag = Boolean(dragNode || resizeNode || llmPaneDrag || knifeChanged || tempLink);
     const hadViewportDrag = Boolean(dragBoard || minimapDrag);
+    let mediaToolClickNode = null;
     if(dragNode){
+        if(dragNode.suppressClickNodeId){
+            if(dragNode.moved){
+                // 只抑制拖动结束后浏览器可能补发的那一次 click；不要把状态持久化，
+                // 否则没有补发 click 时，用户下一次正常单击也会被吞掉。
+                if(dragNode.node.type === 'videoTool') dragNode.node._suppressVideoToolClickUntil = Date.now() + 320;
+                else dragNode.node._suppressImageToolClickUntil = Date.now() + 320;
+            } else if(['imageTool','videoTool'].includes(dragNode.node.type)){
+                mediaToolClickNode = dragNode.node;
+            }
+        }
         const moved = [dragNode.node, ...(dragNode.children || []).map(c => c.node)].filter(Boolean);
         // 拖动 group/promptGroup 自身时不重新评估（成员跟着一起走，包含关系不变）
         const draggedGroup = moved.some(n => n.type === 'group' || n.type === 'promptGroup');
@@ -13070,12 +14665,21 @@ function endDrag(event=null){
     knifeNeedsRender = false;
     if(!event?.shiftKey) setKnifeMode(false);
     if(textSelectionGuard) textSelectionGuard.active = false;
-    document.body.classList.remove('canvas-node-drag', 'canvas-node-resize', 'canvas-selecting', 'canvas-board-pan');
+    document.body.classList.remove('canvas-node-drag', 'canvas-node-resize', 'canvas-image-tool-resize', 'canvas-selecting', 'canvas-board-pan');
     window.onmousemove = null;
     window.onmouseup = null;
+    if(mediaToolClickNode && !mediaToolClickNode.panelOpen){
+        if(mediaToolClickNode.type === 'videoTool') syncVideoToolNodeSize(mediaToolClickNode, true);
+        else syncImageToolNodeSize(mediaToolClickNode, true);
+        refreshNodes([mediaToolClickNode.id]);
+    }
+    if(hadResize){
+        renderLinks();
+        renderSelectionHub();
+    }
     if(shouldRenderKnife) render();
     scheduleMinimapRender();
-    if(hadContentDrag) scheduleSave();
+    if(hadContentDrag || mediaToolClickNode) scheduleSave();
     else if(hadViewportDrag) scheduleViewportSave();
 }
 function nodeRect(n){
@@ -13421,10 +15025,12 @@ function startBoardPan(e, opts={}){
     };
     window.onmouseup = e2 => {
         const shouldClearSelection = dragBoard?.clearSelectionOnClick && !dragBoard.moved && selected.size;
+        const shouldCollapseImageTools = dragBoard?.clearSelectionOnClick && !dragBoard.moved;
         if(shouldClearSelection){
             selected.clear();
             refreshSelectionVisuals();
         }
+        if(shouldCollapseImageTools) collapseOpenImageTools();
         endDrag(e2);
     };
     return true;
@@ -13481,15 +15087,36 @@ board.oncontextmenu = e => {
 board.addEventListener('mousedown', e => {
     if(e.target.closest?.('#createMenu, #linkCreateMenu, #nodeInputMenu, #nodeOutputMenu, #imageNodeMenu')) return;
     closeCreateMenu();
+    if(!e.target.closest?.('.image-tool-option-menu')) closeImageToolOptionMenu();
+    if(!e.target.closest?.('.video-tool-option-menu')) closeVideoToolOptionMenu();
 });
-board.onwheel = e => {
-    if(!canvas) return;
-    e.preventDefault();
+function zoomCanvasFromWheelEvent(e){
     const before = screenToWorld(e.clientX, e.clientY);
-    viewport.scale = viewport.scale * (e.deltaY > 0 ? .92 : 1.08);
+    viewport.scale = Math.max(.12, Math.min(8, viewport.scale * (e.deltaY > 0 ? .92 : 1.08)));
     const rect = board.getBoundingClientRect();
     viewport.x = e.clientX - rect.left - before.x * viewport.scale;
     viewport.y = e.clientY - rect.top - before.y * viewport.scale;
+}
+board.addEventListener('wheel', e => {
+    if(!canvas || !(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation?.();
+    zoomCanvasFromWheelEvent(e);
+    applyViewport();
+    renderLinks();
+    renderSelectionHub();
+    scheduleViewportSave();
+}, {passive:false, capture:true});
+board.onwheel = e => {
+    if(!canvas) return;
+    e.preventDefault();
+    if(e.ctrlKey || e.metaKey){
+        zoomCanvasFromWheelEvent(e);
+    } else {
+        viewport.x -= e.deltaX;
+        viewport.y -= e.deltaY;
+    }
     applyViewport();
     renderLinks();
     renderSelectionHub();
